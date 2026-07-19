@@ -6,6 +6,7 @@ Sophos uses locally-running LLMs to analyze codebases, plan implementations, gen
 
 ## Features
 
+- **Interactive Agent Mode** -- fast tool loop (read, search, edit, run commands) for questions and small tasks, with conversation memory and permission-gated shell access
 - **9-Phase Autonomous Pipeline** -- from repository analysis to final QA
 - **Multi-Agent Consensus** -- 60% supermajority voting with issue deduplication
 - **4 Usage Modes** -- interactive TUI, batch, WebUI, MCP
@@ -39,6 +40,8 @@ bun run dev
 ```
 
 Full-screen terminal UI with live streaming output, session tabs, slash commands, mid-run steering, and git integration. Falls back to a line-based REPL in non-TTY environments (pipes, CI).
+
+Requests route automatically: questions and conversational input go to the **fast agent loop** (reads files, searches, makes surgical edits, runs approved commands, answers with context); explicit build requests ("add X", "implement Y") run the **full 9-phase pipeline**. Force either with `/agent <task>` or `/pipeline <request>`. Mention files with `@path/to/file` to pull them into context (fuzzy completion as you type). While the agent works, typing queues a follow-up; `↑` history persists across restarts.
 
 ### Batch Mode
 

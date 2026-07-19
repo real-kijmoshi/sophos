@@ -280,7 +280,7 @@ export async function calculateConcurrency(
   if (maxByVRAM === 0) {
     // Model won't fit in VRAM — Ollama offloads layers to system RAM.
     // Calculate how many instances fit in available RAM (leave 3GB for OS).
-    const ramGB    = specs.system_ram_mb / 1024;
+    const ramGB     = specs.system_ram_mb / 1024;
     const freeRamGB = Math.max(0, ramGB - 3);
     const maxByRAM  = Math.max(1, Math.floor(freeRamGB / modelVramGB));
     const ramCap    = Math.min(maxByRAM, maxByCPU);
