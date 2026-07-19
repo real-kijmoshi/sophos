@@ -896,9 +896,11 @@ export function helpPanel(): string {
   sec('JUST DESCRIBE WHAT YOU WANT');
   row('"add JWT auth with refresh tokens"',  'full 9-phase pipeline');
   row('"fix the login race condition"',      'analyse + patch + validate');
-  row('"why is checkout slow?"',             'plan mode — analysis only');
+  row('"why is checkout slow?"',             'agent — reads code, answers');
   row('"show me src/auth/jwt.ts"',           'view file');
   row('"revert last change"',                'git stash');
+  row('/agent <question or small task>',     'force the fast agent loop');
+  row('/pipeline <request>',                 'force the full pipeline');
 
   div('or use explicit commands');
 

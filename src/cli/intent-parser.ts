@@ -42,6 +42,8 @@ export const COMMAND_COMPLETIONS: Record<string, string[]> = {
 
 // All top-level slash commands with their description (for hint display)
 export const ALL_COMMANDS: Array<{ name: string; desc: string; aliases?: string[] }> = [
+  { name: '/agent',         desc: 'fast agent — read/edit/run, no pipeline' },
+  { name: '/pipeline',      desc: 'force the full 9-phase pipeline',    aliases: ['/pipe'] },
   { name: '/models',        desc: 'model status + tier assignments',   aliases: ['/model', '/m'] },
   { name: '/diff',          desc: 'colored git diff',                  aliases: ['/d'] },
   { name: '/git',           desc: 'git operations',                    aliases: ['/g'] },

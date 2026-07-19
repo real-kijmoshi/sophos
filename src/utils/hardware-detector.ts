@@ -267,15 +267,32 @@ export async function calculateConcurrency(
   const availableMB   = effectiveFree - overheadMB;
   const maxByVRAM     = Math.max(0, Math.floor(availableMB / perInstanceMB));
   const maxByCPU      = Math.max(1, Math.floor(specs.cpu_cores / 2));
-  const optimal       = Math.min(maxByVRAM, maxByCPU, 8);
 
-  reasons.push(`${modelVramGB}GB model + ${Math.round(contextMB)}MB context (${config.ollama.num_ctx / 1000}K tokens) = ${Math.round(perInstanceMB / 1024 * 10) / 10}GB/instance`);
-  reasons.push(`${Math.round(availableMB / 1024)}GB available after overhead → ${maxByVRAM} fit by VRAM, ${maxByCPU} by CPU`);
+  reasons.push(`${modelVramGB}GB model + ${Math.round(contextMB)}MB ctx = ${Math.round(perInstanceMB / 1024 * 10) / 10}GB/instance`);
+  reasons.push(`${Math.round(availableMB / 1024)}GB available → ${maxByVRAM} fit (VRAM), ${maxByCPU} (CPU)`);
 
-  if (optimal <= 0) {
-    reasons.push(`⚠ Model too large for available VRAM — reduce context or use a smaller model`);
-  } else if (optimal < 4) {
-    reasons.push(`💡 Tip: reduce num_ctx or close other GPU apps to increase concurrency`);
+  // User has explicitly set concurrent_requests (auto_detect_concurrency = false) — respect it
+  const userOverride = !(config as any).ollama?.auto_detect_concurrency
+    ? config.ollama.concurrent_requests
+    : null;
+
+  let optimal: number;
+  if (maxByVRAM === 0) {
+    // Model won't fit in VRAM — Ollama offloads layers to system RAM.
+    // Calculate how many instances fit in available RAM (leave 3GB for OS).
+    const ramGB     = specs.system_ram_mb / 1024;
+    const freeRamGB = Math.max(0, ramGB - 3);
+    const maxByRAM  = Math.max(1, Math.floor(freeRamGB / modelVramGB));
+    const ramCap    = Math.min(maxByRAM, maxByCPU);
+    optimal = userOverride ?? Math.min(ramCap, 4); // cap at 4 to avoid RAM thrashing
+    reasons.push(`⚠ Model too large for VRAM — offloading to RAM (${Math.round(ramGB)}GB system, ${Math.round(freeRamGB)}GB free)`);
+    reasons.push(`  ${maxByRAM} instances fit in RAM, ${maxByCPU} by CPU → using ${optimal}`);
+    if (!userOverride) reasons.push(`💡 Set ollama.concurrent_requests to override, or reduce num_ctx / use a smaller model`);
+  } else {
+    optimal = userOverride ?? Math.min(maxByVRAM, maxByCPU, 8);
+    if (optimal < 4) {
+      reasons.push(`💡 Tip: reduce num_ctx or close other GPU apps to increase concurrency`);
+    }
   }
 
   return {

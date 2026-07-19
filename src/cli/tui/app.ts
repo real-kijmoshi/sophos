@@ -16,6 +16,7 @@
 // Typing while a pipeline runs queues a steering note that is injected into
 // the orchestrator so phases that haven't started yet honor it.
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { format } from 'node:util';
 import { Screen }         from './screen.js';
@@ -45,6 +46,8 @@ import { FileBrowser, FilePicker } from '../file-browser.js';
 import { savePipelineState, loadPipelineState, setProjectStore } from '../pipeline-state.js';
 import { HistoryStore } from '../history-store.js';
 import { FileIndex }    from '../file-index.js';
+import { LLMAgent }         from '../../llm/agent.js';
+import { InteractiveAgent } from '../../llm/interactive-agent.js';
 import type { OrchestratorConfig } from '../../types.js';
 
 const CTRL_C_WINDOW_MS = 2000;
@@ -101,6 +104,12 @@ interface TuiSession {
   lastDeliverables: any;
   /** Pipeline finished while another session was active — badge until visited. */
   unread: false | 'ok' | 'fail';
+  // agent mode (fast tool loop, vs the 9-phase pipeline)
+  mode:          'pipeline' | 'agent';
+  agentActivity: string;
+  agentTools:    number;
+  /** Messages typed while the agent was busy — routed when it finishes. */
+  queued: string[];
 }
 
 export interface TuiConfig {
@@ -163,6 +172,7 @@ export class TuiApp {
 
   private awaitingConfirm = false;
   private pendingConfirmAction: (() => Promise<void>) | null = null;
+  private pendingConfirmCancel: (() => void) | null = null;
 
   private sessionStart  = Date.now();
   private pipelineCount = 0;
@@ -371,6 +381,10 @@ export class TuiApp {
       lastSuccess:      false,
       lastDeliverables: null,
       unread:           false,
+      mode:          'pipeline',
+      agentActivity: '',
+      agentTools:    0,
+      queued:        [],
     };
     this.initPhases(s);
     this.sessions.push(s);
@@ -602,9 +616,19 @@ export class TuiApp {
   private statusRow(w: number): string {
     const s = this.active;
     if (s.running) {
-      const phase = [...s.phases.values()].find(p => p.status === 'running');
-      const spin  = c.accent(FRAMES[this.spinFrame]);
-      const title = phase ? shimmerText(`${phase.name}…`, this.tick >> 1) : c.dim('starting…');
+      const spin = c.accent(FRAMES[this.spinFrame]);
+      let title: string;
+      let right: string;
+      if (s.mode === 'agent') {
+        const act = s.agentActivity ? `agent · ${truncTag(s.agentActivity, 40)}` : 'agent thinking…';
+        title = shimmerText(act, this.tick >> 1);
+        right = s.agentTools > 0 ? `${c.dim(`⚒ ${s.agentTools} tool${s.agentTools > 1 ? 's' : ''}`)} ` : '';
+      } else {
+        const phase = [...s.phases.values()].find(p => p.status === 'running');
+        title = phase ? shimmerText(`${phase.name}…`, this.tick >> 1) : c.dim('starting…');
+        const done = [...s.phases.values()].filter(p => p.status === 'passed').length;
+        right = `${phaseDots([...s.phases.values()].map(p => p.status))} ${c.dim(`${done}/9`)} `;
+      }
       const tps   = s.tokenTimes.length > 1
         ? `${Math.round((s.tokenTimes.length / TPS_WINDOW_MS) * 1000)} tok/s` : '';
       const meta  = [
@@ -612,11 +636,9 @@ export class TuiApp {
         formatDuration(Date.now() - s.pipelineStart),
         s.tokenCount > 0 ? `${kfmt(s.tokenCount)} tok` : '',
         tps,
-        s.streamAgent,
+        s.mode === 'agent' ? '' : s.streamAgent,
       ].filter(Boolean).join(' · ');
       const left  = `  ${spin} ${title} ${c.dim(`(${meta})`)}`;
-      const done  = [...s.phases.values()].filter(p => p.status === 'passed').length;
-      const right = `${phaseDots([...s.phases.values()].map(p => p.status))} ${c.dim(`${done}/9`)} `;
       const gap   = Math.max(1, w - vLen(left) - vLen(right));
       return left + ' '.repeat(gap) + right;
     }
@@ -649,7 +671,7 @@ export class TuiApp {
     const dot    = online ? c.success('●') : c.error('●');
     const modelTag = `${dot} ${c.dim(model ? truncTag(model, 28) : 'no model')}`;
     const tag = [
-      this.active?.running ? c.warning('▷ steering') : '',
+      this.active?.running ? c.warning(this.active.mode === 'agent' ? '▷ agent' : '▷ steering') : '',
       this.planMode        ? c.warning('plan')       : '',
       modelTag,
     ].filter(Boolean).join(c.dim(' · '));
@@ -664,9 +686,13 @@ export class TuiApp {
 
   private placeholder(): string {
     if (this.awaitingConfirm)  return 'y to confirm — anything else cancels';
-    if (this.active?.running)  return 'type to steer the running pipeline — ↵ queues a note';
+    if (this.active?.running) {
+      return this.active.mode === 'agent'
+        ? 'agent working — ↵ queues a follow-up · esc interrupts'
+        : 'type to steer the running pipeline — ↵ queues a note';
+    }
     if (this.planMode)         return 'plan mode — describe what to analyze';
-    return 'describe what to build · "/" for commands';
+    return 'ask or build anything · "@" files · "/" commands';
   }
 
   private footerRow(w: number): string {
@@ -674,7 +700,7 @@ export class TuiApp {
     if (this.palette.visible)       left = `  ${c.dim('↑↓ select · tab complete · ↵ run · esc dismiss')}`;
     else if (this.ctrlCArmed)       left = `  ${c.warning('ctrl+c again to quit')}`;
     else if (this.awaitingConfirm)  left = `  ${c.warning('y to confirm — anything else cancels')}`;
-    else if (this.active?.running)  left = `  ${c.dim('↵ steer · esc interrupt · pgup/pgdn scroll · ctrl+t new session')}`;
+    else if (this.active?.running)  left = `  ${c.dim(`↵ ${this.active.mode === 'agent' ? 'queue follow-up' : 'steer'} · esc interrupt · pgup/pgdn scroll · ctrl+t new session`)}`;
     else {
       const multi = this.sessions.length > 1 ? 'tab switch · ctrl+w close · ' : '';
       left = `  ${c.dim(`/ commands · @ files · ↑ history · ${multi}ctrl+t new session · pgup scroll · ctrl+c ×2 quit`)}`;
@@ -833,15 +859,23 @@ export class TuiApp {
     if (this.awaitingConfirm) {
       this.awaitingConfirm = false;
       const action = this.pendingConfirmAction;
+      const cancel = this.pendingConfirmCancel;
       this.pendingConfirmAction = null;
+      this.pendingConfirmCancel = null;
       if (/^(y|yes)$/i.test(input)) await action?.();
-      else s.transcript.pushRaw(`  ${c.muted('Cancelled.')}`);
+      else { cancel?.(); s.transcript.pushRaw(`  ${c.muted('Cancelled.')}`); }
       return;
     }
 
-    // While this session's pipeline runs: slash commands work, text steers.
+    // While this session works: slash commands run, text steers the pipeline
+    // or queues a follow-up for the agent.
     if (s.running) {
       if (input.startsWith('/')) { await this.runCmd(s, input); return; }
+      if (s.mode === 'agent') {
+        s.queued.push(input);
+        s.transcript.pushRaw(`  ${c.warning('▷')} ${c.dim('queued — runs when the agent finishes')}`);
+        return;
+      }
       s.notes.push(input);
       s.orch?.addSteering(input);
       s.chat.addMessage('user', `[steering] ${input}`);
@@ -868,7 +902,18 @@ export class TuiApp {
       case 'help':    s.transcript.push(helpPanel()); return;
       case 'command': {
         const cmdName = input.replace(/^\//, '').split(/\s+/)[0];
+        const rest    = input.replace(/^\/\S+\s*/, '').trim();
         if (cmdName === 'resume' || cmdName === 'r') { this.resumePrefill(s); return; }
+        if (cmdName === 'agent') {
+          if (!rest) { s.transcript.pushRaw(`  ${c.dim('usage: /agent <question or small task> — fast tool loop, no pipeline')}`); return; }
+          await this.doAgent(s, rest);
+          return;
+        }
+        if (cmdName === 'pipeline' || cmdName === 'pipe') {
+          if (!rest) { s.transcript.pushRaw(`  ${c.dim('usage: /pipeline <request> — force the full 9-phase pipeline')}`); return; }
+          await this.doPipeline(s, rest, this.planMode);
+          return;
+        }
         await this.runCmd(s, '/' + input.replace(/^\//, ''));
         return;
       }
@@ -879,7 +924,7 @@ export class TuiApp {
         return;
       case 'git':     await this.runCmd(s, '/git ' + (intent.gitOp || 'status')); return;
       case 'view':    await this.runCmd(s, '/inspect ' + (intent.viewTarget || input)); return;
-      case 'explain': await this.doPipeline(s, `Explain: ${intent.explainTarget || input}`, true); return;
+      case 'explain': await this.doAgent(s, intent.explainTarget || input); return;
       case 'model':
         if (intent.modelOverride) {
           this.modelSelector.setCurrentModel(intent.modelOverride.model);
@@ -889,6 +934,9 @@ export class TuiApp {
       default: {
         const req  = intent.pipelineRequest || input;
         const plan = intent.planOnly || this.planMode;
+        // Conversational / ambiguous input goes to the fast agent loop —
+        // explicit build verbs (high confidence) get the full pipeline.
+        if (intent.confidence < 0.7 && !plan) { await this.doAgent(s, req); return; }
         this.recentIntents.push(req);
         const sugg = generateSuggestions(req, this.recentIntents, this.suggestionCtx);
         if (sugg.length && !plan) s.transcript.push(suggestionsBar(sugg));
@@ -911,6 +959,7 @@ export class TuiApp {
 
     if (!s.title) { s.title = titleFor(request); this.dirty = true; }
     s.running        = true;
+    s.mode           = 'pipeline';
     s.pipelineStart  = Date.now();
     s.lastRequest    = request;
     s.lastSuccess    = false;
@@ -1067,6 +1116,154 @@ export class TuiApp {
       this.lastPipeline = loadPipelineState();   // keep the welcome-screen hint fresh
       this.dirty = true;
     }
+  }
+
+  // ── Agent mode — fast tool loop for questions, chat, and small edits ────────
+
+  private async doAgent(s: TuiSession, request: string): Promise<void> {
+    if (!this.modelSelector.isOllamaOnline()) {
+      s.transcript.push(errorCard({ title: 'Ollama not running', message: 'connect ECONNREFUSED 127.0.0.1:11434' }));
+      return;
+    }
+    if (!this.modelSelector.getCurrentModel()) {
+      await this.suspendTui(() => this.modelSelector.runSetupWizard('local'));
+      if (!this.modelSelector.getCurrentModel()) return;
+    }
+
+    if (!s.title) { s.title = titleFor(request); this.dirty = true; }
+    s.running       = true;
+    s.mode          = 'agent';
+    s.pipelineStart = Date.now();
+    s.lastRequest   = request;
+    s.streamBuf     = '';
+    s.streamAgent   = '';
+    s.tokenCount    = 0;
+    s.tokenTimes    = [];
+    s.agentTools    = 0;
+    s.agentActivity = '';
+    s.abortCtrl     = new AbortController();
+
+    const model = this.modelSelector.getChatModel() || this.modelSelector.getCurrentModel()!;
+    s.chat.addMessage('user', request);
+    let ok = false;
+
+    try {
+      const llm = new LLMAgent(loadConfig());
+      llm.setAbortSignal(s.abortCtrl.signal);
+      llm.onToken(chunk => {
+        s.tokenCount++;
+        const now = Date.now();
+        s.tokenTimes.push(now);
+        while (s.tokenTimes.length && s.tokenTimes[0] < now - TPS_WINDOW_MS) s.tokenTimes.shift();
+        s.streamBuf = (s.streamBuf + chunk).slice(-4000);
+        this.dirty = true;
+      });
+
+      // Conversation history (without the message just added) makes follow-ups work.
+      const hist = s.chat.getMessages().slice(0, -1)
+        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .slice(-12)
+        .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content.slice(0, 4000) }));
+
+      const mentions = this.loadMentions(request);
+      const fullRequest = mentions ? `${request}\n\n${mentions}` : request;
+
+      const agent = new InteractiveAgent(llm, this.cfg.projectDir, model, {
+        onAction: line => {
+          s.agentTools++;
+          s.agentActivity = line;
+          s.streamBuf = '';
+          s.transcript.pushRaw('');
+          s.transcript.pushRaw(`  ${c.accent('●')} ${c.text(line)}`);
+          this.dirty = true;
+        },
+        onResult: line => {
+          s.transcript.pushRaw(`    ${c.dim('⎿')}  ${c.muted(line)}`);
+          this.dirty = true;
+        },
+        approveCommand: cmd => this.approveAgentCommand(s, cmd),
+      }, s.abortCtrl.signal);
+
+      const result = await agent.run(fullRequest, hist);
+      ok = true;
+
+      s.chat.addMessage('assistant', result.answer);
+      this.totalTokens += result.totalTokens;
+      this.costTracker.track(model, result.totalTokens, 0, request);
+
+      s.transcript.pushRaw('');
+      for (const line of result.answer.split('\n')) s.transcript.pushRaw(`  ${c.text(line)}`);
+      if (result.filesChanged.length) {
+        const names = result.filesChanged.slice(0, 5).join(', ')
+          + (result.filesChanged.length > 5 ? ` +${result.filesChanged.length - 5} more` : '');
+        s.transcript.pushRaw('');
+        s.transcript.pushRaw(`  ${c.success('✓')} changed ${result.filesChanged.length} file${result.filesChanged.length > 1 ? 's' : ''}: ${c.text(names)}`);
+        s.transcript.pushRaw(`  ${c.dim('/diff to review · /git commit <msg> to keep · /rollback to undo')}`);
+      }
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        s.transcript.pushRaw(`  ${c.warning('⏹ agent interrupted')} ${c.dim(`after ${formatDuration(Date.now() - s.pipelineStart)}`)}`);
+      } else {
+        s.transcript.push(errorCard({
+          title: 'Agent error', message: err.message,
+          hints: classifyError(err.message),
+        }));
+      }
+    } finally {
+      s.running       = false;
+      s.abortCtrl     = null;
+      s.streamBuf     = '';
+      s.agentActivity = '';
+      if (s !== this.active) s.unread = ok ? 'ok' : 'fail';
+      this.dirty = true;
+      this.drainQueue(s);
+    }
+  }
+
+  /** Shell-command approval: PermissionSystem allowlist first, then a y/N prompt. */
+  private approveAgentCommand(s: TuiSession, cmd: string): Promise<boolean> {
+    return this.permissions
+      .check('bash', cmd, msg => this.confirmAsync(s, `${msg} — agent wants to run: ${cmd}`))
+      .then(v => v === 'allow');
+  }
+
+  /** Promise-flavored y/N confirm on the shared confirm flow (abort ⇒ deny). */
+  private confirmAsync(s: TuiSession, message: string): Promise<boolean> {
+    return new Promise<boolean>(resolve => {
+      this.awaitingConfirm = true;
+      this.pendingConfirmAction = async () => resolve(true);
+      this.pendingConfirmCancel = () => resolve(false);
+      s.abortCtrl?.signal.addEventListener('abort', () => resolve(false), { once: true });
+      s.transcript.push(confirmPrompt(message));
+      s.transcript.toBottom();
+      this.dirty = true;
+    });
+  }
+
+  /** Read @-mentioned files into a context block for the agent. */
+  private loadMentions(request: string): string {
+    const blocks: string[] = [];
+    for (const m of request.matchAll(/@([\w./\\-]+)/g)) {
+      const full = path.resolve(this.cfg.projectDir, m[1]);
+      if (!full.startsWith(path.resolve(this.cfg.projectDir))) continue;
+      try {
+        const lines = fs.readFileSync(full, 'utf-8').split('\n');
+        const slice = lines.slice(0, 200).map((l, i) => `${String(i + 1).padStart(4)}| ${l}`);
+        const more  = lines.length > 200 ? `\n… ${lines.length - 200} more lines (use read_file for the rest)` : '';
+        blocks.push(`MENTIONED FILE ${m[1]} (${lines.length} lines):\n${slice.join('\n')}${more}`);
+      } catch { /* not a real file — leave the mention as text */ }
+    }
+    return blocks.join('\n\n');
+  }
+
+  /** Run the next queued follow-up, if any. */
+  private drainQueue(s: TuiSession): void {
+    const next = s.queued.shift();
+    if (next === undefined) return;
+    s.transcript.pushRaw('');
+    s.transcript.pushRaw(`  ${c.dim('❯')} ${c.text(next)} ${c.dim('(queued)')}`);
+    s.transcript.toBottom();
+    this.route(s, next).catch(() => {});
   }
 
   // ── Actions (ship / rollback / diff / files) ────────────────────────────────

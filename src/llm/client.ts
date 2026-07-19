@@ -111,13 +111,20 @@ export class OllamaClient {
     const timer = setTimeout(() => ctrl.abort(), timeout);
     opts.signal?.addEventListener('abort', () => ctrl.abort(), { once: true });
 
-    const res = await fetch(`${this.baseUrl}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
-    clearTimeout(timer);
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      throw err;
+    }
+    // Do NOT clear the timer here — it must cover the full streaming duration,
+    // not just the connection setup. It will be cleared after the stream ends.
 
     if (!res.ok) throw new Error(`Ollama ${res.status}: ${res.statusText}`);
 
@@ -152,6 +159,7 @@ export class OllamaClient {
         }
       }
     } finally {
+      clearTimeout(timer);
       reader.releaseLock();
     }
 
