@@ -107,7 +107,9 @@ export class SessionManager {
   }
 
   saveSession(filename?: string): string {
-    const name = filename || `session-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const name = filename || `session-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}.json`;
 
     // Prefer project store
     const projectDir = this.getProjectSessionsDir();

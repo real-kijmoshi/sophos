@@ -23,6 +23,7 @@ export interface BrowserResult {
 export class FileBrowser {
   private cwd:         string;
   private entries:     FileEntry[] = [];
+  private dirError:    string | null = null;
   private cursor:      number = 0;
   private scroll:      number = 0;
   private history:     string[] = [];
@@ -45,6 +46,7 @@ export class FileBrowser {
   }
 
   private loadDir(): void {
+    this.dirError = null;
     try {
       const raw = fs.readdirSync(this.cwd, { withFileTypes: true });
       this.entries = raw
@@ -66,8 +68,9 @@ export class FileBrowser {
       this.scroll = 0;
       this.previewContent = null;
       this.previewFile = null;
-    } catch {
+    } catch (err: any) {
       this.entries = [];
+      this.dirError = err.message || 'Cannot read directory';
     }
   }
 
@@ -91,34 +94,39 @@ export class FileBrowser {
     lines.push('');
 
     // File list
-    const visibleCount = Math.min(this.entries.length, 20);
-    for (let i = 0; i < visibleCount; i++) {
-      const e = this.entries[i];
-      const isSelected = i === this.cursor;
-      const prefix = isSelected ? c.primary('▸') : ' ';
-      const icon = e.isDir ? c.primary('📁') : c.dim('📄');
-      const name = e.isDir ? c.accent.bold(e.name + '/') : c.text(e.name);
-      const size = e.isDir ? '' : c.dim(formatSize(e.size));
+    if (this.dirError) {
+      lines.push(`  ${c.error('⚠')}  ${c.error(this.dirError)}`);
+      lines.push(`  ${c.dim('Press Esc to go back.')}`);
+    } else {
+      const visibleCount = Math.min(this.entries.length, 20);
+      for (let i = 0; i < visibleCount; i++) {
+        const e = this.entries[i];
+        const isSelected = i === this.cursor;
+        const prefix = isSelected ? c.primary('▸') : ' ';
+        const icon = e.isDir ? c.primary('📁') : c.dim('📄');
+        const name = e.isDir ? c.accent.bold(e.name + '/') : c.text(e.name);
+        const size = e.isDir ? '' : c.dim(formatSize(e.size));
 
-      lines.push(`  ${prefix} ${icon} ${name} ${size}`);
-    }
-
-    if (this.entries.length > 20) {
-      lines.push(c.dim(`    … ${this.entries.length - 20} more`));
-    }
-
-    // Preview pane
-    if (this.previewContent) {
-      lines.push('');
-      lines.push('  ' + c.dim('─'.repeat(w - 4)));
-      lines.push(`  ${c.accent('Preview:')} ${c.dim(this.previewFile ?? '')}`);
-      lines.push('');
-      const previewLines = this.previewContent.split('\n').slice(0, 15);
-      for (const pl of previewLines) {
-        lines.push(`  ${c.text(pl.slice(0, w - 4))}`);
+        lines.push(`  ${prefix} ${icon} ${name} ${size}`);
       }
-      if (this.previewContent.split('\n').length > 15) {
-        lines.push(c.dim(`    … ${this.previewContent.split('\n').length - 15} more lines`));
+
+      if (this.entries.length > 20) {
+        lines.push(c.dim(`    … ${this.entries.length - 20} more`));
+      }
+
+      // Preview pane
+      if (this.previewContent) {
+        lines.push('');
+        lines.push('  ' + c.dim('─'.repeat(w - 4)));
+        lines.push(`  ${c.accent('Preview:')} ${c.dim(this.previewFile ?? '')}`);
+        lines.push('');
+        const previewLines = this.previewContent.split('\n').slice(0, 15);
+        for (const pl of previewLines) {
+          lines.push(`  ${c.text(pl.slice(0, w - 4))}`);
+        }
+        if (this.previewContent.split('\n').length > 15) {
+          lines.push(c.dim(`    … ${this.previewContent.split('\n').length - 15} more lines`));
+        }
       }
     }
 

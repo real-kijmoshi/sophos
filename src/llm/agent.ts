@@ -28,6 +28,9 @@ export class LLMAgent {
   private overrideExecutor?: string;
   private overrideChat?:     string;
 
+  // Abort signal — set by Orchestrator to interrupt long-running LLM calls
+  private abortSignal?: AbortSignal;
+
   // Global token callback — wired by Orchestrator → PhaseRenderer
   private tokenCallback: TokenCallback | null = null;
 
@@ -40,6 +43,11 @@ export class LLMAgent {
   /** Wire a callback that receives every token chunk as it streams. */
   onToken(cb: TokenCallback): void {
     this.tokenCallback = cb;
+  }
+
+  /** Set abort signal to interrupt long-running LLM calls mid-flight. */
+  setAbortSignal(signal?: AbortSignal): void {
+    this.abortSignal = signal;
   }
 
   // ── Model resolution ──────────────────────────────────────────────────────────
@@ -59,8 +67,8 @@ export class LLMAgent {
       case 'medium':   return this.overrideMedium   || this.config.ollama.model_medium   || '';
       case 'large':    return this.overrideLarge    || this.config.ollama.model_large    || '';
       case 'coder':    return this.overrideCoder    || this.config.ollama.model_coder    || this.config.ollama.model_medium || '';
-      case 'planner':  return this.overridePlanner  || this.config.ollama.model_planner  || this.config.ollama.model_large  || '';
-      case 'executor': return this.overrideExecutor || this.config.ollama.model_executor || this.config.ollama.model_large  || '';
+      case 'planner':  return this.overridePlanner  || this.config.ollama.model_planner  || this.config.ollama.model_large  || this.config.ollama.model_medium || '';
+      case 'executor': return this.overrideExecutor || this.config.ollama.model_executor || this.config.ollama.model_medium || '';
       case 'chat':     return this.overrideChat     || this.config.ollama.model_chat     || this.config.ollama.model_medium || '';
     }
   }
@@ -94,7 +102,7 @@ export class LLMAgent {
         (chunk: string) => {
           this.tokenCallback?.(chunk, agentName);
         },
-        { model, temperature: options.temperature, timeout_ms: options.timeout_ms, format: options.format },
+        { model, temperature: options.temperature, timeout_ms: options.timeout_ms, format: options.format, signal: this.abortSignal },
       );
     } else {
       // ── Non-streaming path (JSON calls always go here) ──────────────────────
@@ -103,6 +111,7 @@ export class LLMAgent {
         format:      options.format,
         temperature: options.temperature,
         timeout_ms:  options.timeout_ms,
+        signal:      this.abortSignal,
       });
     }
 
@@ -138,7 +147,11 @@ export class LLMAgent {
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        const resp   = await this.call(agentName, messages, { ...options, format: 'json' });
+        // Always use non-streaming for JSON calls:
+        // 1. Partial JSON tokens are not renderable by the UI anyway.
+        // 2. The streaming path clears its timeout timer after headers arrive,
+        //    making timeout_ms ineffective for the actual generation time.
+        const resp = await this.call(agentName, messages, { ...options, format: 'json', stream: false });
         return this.parseJSON(resp.content) as T;
       } catch (err: any) {
         lastError = err;

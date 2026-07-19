@@ -5,6 +5,7 @@
 // Ctrl+C clears the line and quits on a double press, Esc interrupts pipelines.
 
 import * as path from 'node:path';
+import pkg from '../../package.json';
 import {
   welcomeCard, suggestionsBar, shipItPanel,
   helpPanel, errorCard, goodbyeCard, contextLine, classifyError,
@@ -326,7 +327,7 @@ export class SophosREPL {
 
     switch (intent.type) {
       case 'exit':    this.goodbye(); process.exit(0); return;
-      case 'help':    this.print(helpPanel()); return;
+      case 'help':    this.print(helpPanel(pkg.version)); return;
       case 'command': await this.runCmd('/' + input.replace(/^\//, '')); return;
       case 'rollback':await this.confirmAction('This will stash your current changes.', () => this.doRollback()); return;
       case 'git':     await this.runCmd('/git ' + (intent.gitOp || 'status')); return;

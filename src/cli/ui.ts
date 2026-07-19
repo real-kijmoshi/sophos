@@ -83,11 +83,6 @@ export function formatNumber(n: number): string {
   return n.toString();
 }
 
-export function fmtNum(n: number): string {
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return String(n);
-}
-
 export function center(text: string, width: number): string {
   const padding = Math.max(0, Math.floor((width - vLen(text)) / 2));
   return ' '.repeat(padding) + text;
@@ -278,9 +273,10 @@ export function banner(ctx?: {
   fileCount?:   number;
   branch?:      string;
   dirty?:       boolean;
+  version?:     string;
 }): string {
   const w    = W();
-  const logo = c.primary.bold('◆ SOPHOS') + c.dim(' v3.0');
+  const logo = c.primary.bold('◆ SOPHOS') + c.dim(` ${ctx?.version ?? 'v3.2'}`);
 
   const rightParts: string[] = [];
   if (ctx?.projectName) rightParts.push(c.muted(ctx.projectName));
@@ -312,7 +308,7 @@ export function statusBar(opts: {
     ? c.dim(opts.model.length > 26 ? opts.model.slice(0, 24) + '…' : opts.model)
     : c.warning('no model');
   const plan   = opts.planMode ? c.warning('plan') : '';
-  const tokens = opts.tokens   ? c.dim(`${fmtNum(opts.tokens)} tok`) : '';
+  const tokens = opts.tokens   ? c.dim(`${formatNumber(opts.tokens)} tok`) : '';
   const branch = opts.branch
     ? (opts.dirty ? c.warning('⎇ ' + opts.branch + '*') : c.dim('⎇ ' + opts.branch))
     : '';
@@ -350,7 +346,7 @@ export function inputStatusLine(opts: {
     parts.push(opts.dirty ? c.warning(`⎇ ${opts.branch}*`) : c.dim(`⎇ ${opts.branch}`));
   }
   if (opts.planMode) parts.push(c.warning('plan'));
-  if (opts.tokens)   parts.push(c.dim(`${fmtNum(opts.tokens)} tok`));
+  if (opts.tokens)   parts.push(c.dim(`${formatNumber(opts.tokens)} tok`));
 
   const left  = parts.join(c.dim('  ·  '));
   const right = c.dim(opts.hint ?? '/ commands · tab complete');
@@ -471,7 +467,7 @@ export function streamingOutput(opts: {
   // Status line
   const parts: string[] = [];
   if (opts.tokenCount && opts.tokenCount > 0) {
-    parts.push(c.dim(`${fmtNum(opts.tokenCount)} tok`));
+    parts.push(c.dim(`${formatNumber(opts.tokenCount)} tok`));
   }
   if (opts.elapsedMs) {
     parts.push(c.dim(formatDuration(opts.elapsedMs)));
@@ -501,7 +497,7 @@ export function toolCallCard(opts: {
     : opts.status === 'done'   ? c.success : c.error;
 
   const dur = opts.durationMs !== undefined ? c.dim(` ${formatDuration(opts.durationMs)}`) : '';
-  const chevron = opts.collapsed !== false ? c.dim('›') : c.dim('∨');
+  const chevron = opts.collapsed !== false ? c.dim('>') : c.dim('v');
 
   const header = `  ${icon} ${nameColor(opts.name)}${dur}`;
   const pad = Math.max(0, w - vLen(header) - 2);
@@ -605,8 +601,8 @@ export function taskGrid(tasks: TaskRow[]): string {
 
 // ── Progress bar ──────────────────────────────────────────────────────────────
 export function progressBar(current: number, total: number, label = '', width = 24): string {
-  const pct    = total > 0 ? current / total : 0;
-  const filled = Math.floor(pct * width);
+  const pct    = total > 0 ? Math.max(0, Math.min(1, current / total)) : 0;
+  const filled = Math.max(0, Math.min(width, Math.floor(pct * width)));
   const bar    = c.success('█'.repeat(filled)) + c.dim('░'.repeat(width - filled));
   return `${bar} ${c.dim(Math.floor(pct * 100) + '%')}  ${c.dim(label)}`;
 }
@@ -625,7 +621,7 @@ export function diffCard(taskId: string, fileSummary: string, lines: string[], m
       c.text(l);
     return '  ' + col.slice(0, w - 2);
   }).join('\n');
-  return [header, div, body, div, `  ${c.dim('[d] full diff  [v] view file')}`].join('\n');
+  return [header, div, body, div].join('\n');
 }
 
 // ── Suggestions bar ───────────────────────────────────────────────────────────
@@ -652,7 +648,7 @@ export function contextLine(ctx: {
   }
   if (ctx.model)       parts.push(c.dim(ctx.model));
   if (ctx.fileCount)   parts.push(c.dim(`${ctx.fileCount} files`));
-  if (ctx.tokens)      parts.push(c.dim(`${fmtNum(ctx.tokens)} tok`));
+  if (ctx.tokens)      parts.push(c.dim(`${formatNumber(ctx.tokens)} tok`));
   return '  ' + parts.join(c.dim('  ·  '));
 }
 
@@ -861,7 +857,7 @@ export function goodbyeCard(stats: {
   const stats_row = [
     c.dim(formatDuration(stats.sessionMs)) + c.dim(' session'),
     stats.pipelines > 0 ? c.accent(String(stats.pipelines)) + c.dim(' pipeline' + (stats.pipelines !== 1 ? 's' : '')) : '',
-    stats.tokens    > 0 ? c.dim(fmtNum(stats.tokens)) + c.dim(' tokens') : '',
+    stats.tokens    > 0 ? c.dim(formatNumber(stats.tokens)) + c.dim(' tokens') : '',
     stats.commits   > 0 ? c.success(String(stats.commits)) + c.dim(' commit' + (stats.commits !== 1 ? 's' : '')) : '',
   ].filter(Boolean).join(c.dim('  ·  '));
 
@@ -876,7 +872,7 @@ export function goodbyeCard(stats: {
 }
 
 // ── Help panel ────────────────────────────────────────────────────────────────
-export function helpPanel(): string {
+export function helpPanel(version?: string): string {
   const w     = W();
   const lines: string[] = [];
   const hr    = () => lines.push('  ' + c.dim('─'.repeat(Math.min(66, w - 4))));
@@ -890,7 +886,7 @@ export function helpPanel(): string {
 
   lines.push('');
   hr();
-  lines.push(`  ${c.primary.bold('◆ SOPHOS')}  ${c.dim('v3.0  ·  Multi-Agent Orchestrator')}`);
+  lines.push(`  ${c.primary.bold('◆ SOPHOS')}  ${c.dim(`${version ?? 'v3.2'}  ·  Multi-Agent Orchestrator`)}`);
   hr();
 
   sec('JUST DESCRIBE WHAT YOU WANT');
@@ -903,13 +899,17 @@ export function helpPanel(): string {
   div('or use explicit commands');
 
   sec('MODEL COMMANDS');
-  row('/models',               'status + tier table');
-  row('/models suggest',       'download recommendations');
-  row('/models set <name>',    'set medium tier model');
-  row('/models small <name>',  'set small tier model');
-  row('/models large <name>',  'set large tier model');
-  row('/models save local',    'save to .sophos.json');
-  row('/models save global',   'save to ~/.config/sophos/config.json');
+  row('/models',                   'role assignment table');
+  row('/models assign',            'interactive arrow-key picker');
+  row('/models suggest',           'smart upgrade suggestions');
+  row('/models coder <name>',      'set coder model');
+  row('/models planner <name>',    'set planner model');
+  row('/models executor <name>',   'set executor model');
+  row('/models chat <name>',       'set chat model');
+  row('/models scanner <name>',    'set scanner (analysis) model');
+  row('/models architect <name>',  'set architect (planning) model');
+  row('/models save local',        'save to .sophos.json');
+  row('/models save global',       'save to ~/.config/sophos/config.json');
 
   div('git');
 
@@ -976,7 +976,7 @@ export function notificationTray(notifications: Notification[]): string {
   const lines = notifications.slice(0, 5).map(n =>
     `  ${icon(n.type)}  ${c.muted(n.message.slice(0, 72))}`
   );
-  return [`  ${c.dim('─── notifications ───')}`, ...lines, ''].join('\n');
+  return [`  ${c.dim('─── notifications ───')}`, ...lines, `  ${c.dim('press any key to dismiss')}`, ''].join('\n');
 }
 
 // ── Cancellation summary card ────────────────────────────────────────────────
@@ -1026,7 +1026,7 @@ export function cancelCard(opts: {
   // Action hints
   const hints: string[] = [];
   if (opts.phasesDone > 0) {
-    hints.push(`${c.primary.bold('resume')}  continue where you left off`);
+    hints.push(`${c.primary.bold('resume')}  continue where you left off (re-run with /resume)`);
   }
   hints.push(`${c.muted('diff')}      review what was written so far`);
   hints.push(`${c.muted('exit')}      discard and quit`);

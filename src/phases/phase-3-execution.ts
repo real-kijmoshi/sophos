@@ -24,12 +24,56 @@ export async function executeExecutionPlanning(
   console.log('  Generating detailed task prompts via LLM...');
 
   const prompt = PROMPTS.executionPlan(spec, context);
-  const tasks = await agent.callJSON<TaskPrompt[]>('execution-planner', [
-    { role: 'system', content: prompt.system },
-    { role: 'user', content: prompt.user },
-  ], { model_tier: 'executor', timeout_ms: 180_000 });
 
-  const taskList = Array.isArray(tasks) ? tasks : (tasks as any).tasks || [];
+  // Use streaming so the connection stays alive and we get heartbeat feedback.
+  // callJSON forces stream:false, which buffers the entire response before
+  // returning a single byte — with a large/offloaded model this hangs silently.
+  let rawContent = '';
+  let tokenCount = 0;
+  let lastDot = Date.now();
+
+  // Wire a temporary token callback to collect content + show heartbeat dots.
+  // We save/restore the existing callback so we don't break UI streaming in TUI mode.
+  const prevCallback = (agent as any).tokenCallback as ((chunk: string, name: string) => void) | null;
+  (agent as any).tokenCallback = (chunk: string, _name: string) => {
+    rawContent += chunk;
+    tokenCount++;
+    // Print a dot every ~3 seconds to show progress without spamming
+    const now = Date.now();
+    if (now - lastDot > 3000) {
+      process.stdout.write('.');
+      lastDot = now;
+    }
+    // Also forward to the real UI callback if one exists
+    prevCallback?.(chunk, 'execution-planner');
+  };
+
+  try {
+    await agent.call('execution-planner', [
+      { role: 'system', content: prompt.system },
+      { role: 'user', content: prompt.user },
+    ], { model_tier: 'executor', format: 'json', stream: true, timeout_ms: 300_000 });
+  } finally {
+    // Always restore previous callback
+    (agent as any).tokenCallback = prevCallback;
+    // End the dots line if we printed any
+    if (tokenCount > 0) process.stdout.write('\n');
+  }
+
+  // Parse the accumulated JSON (reuse agent's private parseJSON logic via callJSON path)
+  let tasks: TaskPrompt[];
+  try {
+    const parsed = parseJSON(rawContent);
+    tasks = Array.isArray(parsed) ? parsed : (parsed as any).tasks || [];
+  } catch {
+    // If parsing fails on the full content, surface a clear error
+    throw new Error(
+      `Execution planner returned invalid JSON (${tokenCount} tokens received). ` +
+      `Raw content start: ${rawContent.slice(0, 200)}`
+    );
+  }
+
+  const taskList = tasks;
 
   for (const task of taskList) {
     if (!task.task_id) task.task_id = `TASK-${String(taskList.indexOf(task) + 1).padStart(3, '0')}`;
@@ -53,6 +97,20 @@ export async function executeExecutionPlanning(
     parallel_groups: parallelGroups,
     critical_path: criticalPath,
   };
+}
+
+// ── JSON parsing helper (mirrors agent.ts parseJSON) ─────────────────────────
+function parseJSON(content: string): any {
+  let s = content.trim();
+  const m = s.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+  if (m) s = m[1].trim();
+  s = s.replace(/^JSON:\s*/i, '');
+  try { return JSON.parse(s); } catch { /* */ }
+  const a = s.indexOf('{'), b = s.lastIndexOf('}');
+  if (a !== -1 && b > a) try { return JSON.parse(s.slice(a, b + 1)); } catch { /* */ }
+  const c = s.indexOf('['), d = s.lastIndexOf(']');
+  if (c !== -1 && d > c) try { return JSON.parse(s.slice(c, d + 1)); } catch { /* */ }
+  throw new Error('Could not parse JSON from LLM response');
 }
 
 function identifyParallelGroups(tasks: TaskPrompt[]): string[][] {

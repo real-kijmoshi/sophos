@@ -4,6 +4,7 @@
 // so the PhaseRenderer can display live collapsible cards.
 
 import { EventEmitter } from 'node:events';
+import { globalBus }    from './global-bus.js';
 import { PhaseManager }                from './phases/phase-manager.js';
 import { executeRepositoryAnalysis }   from './phases/phase-1-repository.js';
 import { executePlanningSwarm }        from './phases/phase-2-planning.js';
@@ -39,13 +40,17 @@ export interface PhaseStartEvent  { phaseId: string; phaseName: string; }
 export interface PhaseLineEvent   { phaseId: string; line: string; }
 export interface PhaseDoneEvent   { phaseId: string; phaseName: string; durationMs: number; }
 export interface PhaseFailEvent   { phaseId: string; phaseName: string; durationMs: number; error: string; }
-export interface TaskUpdateEvent  { id: string; description: string; status: 'queue'|'active'|'done'|'failed'|'repair'; reviewers?: string; }
+export interface TaskUpdateEvent  { id: string; description: string; status: 'queue'|'active'|'done'|'failed'|'repair'; reviewers?: string; effort?: 'small' | 'medium' | 'large'; }
 
 export class Orchestrator extends EventEmitter {
+  private static jobCounter = 0;
   private orchestratorConfig: OrchestratorConfig;
   private sophosConfig: SophosConfig;
   private phaseManager: PhaseManager;
   private llm: LLMAgent;
+  private abortSignal?: AbortSignal;
+  readonly jobId: string;
+  private source: 'tui' | 'webui' | 'batch' | 'mcp' = 'tui';
 
   // Phase state
   private contextPackage?:     ContextPackage;
@@ -57,8 +62,10 @@ export class Orchestrator extends EventEmitter {
   private securityFindings?:   SecurityFinding[];
   private validationResult?:   ValidationResult;
 
-  constructor(orchestratorConfig: OrchestratorConfig, sophosConfig: SophosConfig) {
+  constructor(orchestratorConfig: OrchestratorConfig, sophosConfig: SophosConfig, source: 'tui' | 'webui' | 'batch' | 'mcp' = 'tui') {
     super();
+    this.jobId  = `job-${++Orchestrator.jobCounter}`;
+    this.source = source;
     this.orchestratorConfig = orchestratorConfig;
 
     // Merge runtime model overrides into a patched config so all phases use the right models
@@ -79,6 +86,13 @@ export class Orchestrator extends EventEmitter {
     this.phaseManager = new PhaseManager();
     this.llm          = new LLMAgent(this.sophosConfig);
     this.registerPhases();
+
+    // Announce to global bus so WebUI (and any other subscriber) knows a job started
+    globalBus.emit('job:started', {
+      jobId:   this.jobId,
+      request: orchestratorConfig.user_request,
+      source:  this.source,
+    });
   }
 
   private registerPhases(): void {
@@ -95,6 +109,8 @@ export class Orchestrator extends EventEmitter {
 
   // ── Public execute ────────────────────────────────────────────────────────────
   async execute(signal?: AbortSignal): Promise<{ success: boolean; results: PhaseResult[]; deliverables?: any }> {
+    this.abortSignal = signal;
+    this.llm.setAbortSignal(signal);
     const available = await this.llm.isAvailable();
     if (!available) {
       this.emit('phase:line', { phaseId: 'repository-analysis', line: `✗ Ollama not reachable at ${this.sophosConfig.ollama.base_url}` } satisfies PhaseLineEvent);
@@ -104,12 +120,15 @@ export class Orchestrator extends EventEmitter {
     // Wire token streaming → emit llm:token for every streamed chunk
     this.llm.onToken((chunk: string, agentName: string) => {
       this.emit('llm:token', { chunk, agentName });
+      globalBus.emit('llm:token', { jobId: this.jobId, chunk, agentName });
     });
 
     const results = await this.phaseManager.executeAll(signal);
+    this.llm.setAbortSignal(undefined);
     const allPassed = results.every(r => r.status === 'passed' || r.status === 'skipped');
 
     this.emit('pipeline:done', { success: allPassed });
+    globalBus.emit('job:done', { jobId: this.jobId, success: allPassed });
 
     if (allPassed) {
       return { success: true, results, deliverables: this.generateDeliverables() };
@@ -125,28 +144,36 @@ export class Orchestrator extends EventEmitter {
   addSteering(note: string): void {
     this.orchestratorConfig.user_request += `\n\nUSER STEERING NOTE (added mid-run, honor it): ${note}`;
     this.emit('steering', { note });
+    globalBus.emit('steering:ack', { jobId: this.jobId, note });
   }
 
   // ── Phase helpers ─────────────────────────────────────────────────────────────
   private phaseStart(id: string, name: string): number {
     this.emit('phase:start', { phaseId: id, phaseName: name } satisfies PhaseStartEvent);
+    globalBus.emit('pipeline:event', { jobId: this.jobId, event: { type: 'phase:start', timestamp: Date.now(), phaseId: id, phaseName: name } });
     return Date.now();
   }
 
   private phaseLine(id: string, line: string): void {
     this.emit('phase:line', { phaseId: id, line } satisfies PhaseLineEvent);
+    globalBus.emit('pipeline:event', { jobId: this.jobId, event: { type: 'phase:line', timestamp: Date.now(), phaseId: id, line } });
   }
 
   private phaseDone(id: string, name: string, startMs: number): void {
-    this.emit('phase:done', { phaseId: id, phaseName: name, durationMs: Date.now() - startMs } satisfies PhaseDoneEvent);
+    const durationMs = Date.now() - startMs;
+    this.emit('phase:done', { phaseId: id, phaseName: name, durationMs } satisfies PhaseDoneEvent);
+    globalBus.emit('pipeline:event', { jobId: this.jobId, event: { type: 'phase:done', timestamp: Date.now(), phaseId: id, phaseName: name, durationMs } });
   }
 
   private phaseFail(id: string, name: string, startMs: number, error: string): void {
-    this.emit('phase:fail', { phaseId: id, phaseName: name, durationMs: Date.now() - startMs, error } satisfies PhaseFailEvent);
+    const durationMs = Date.now() - startMs;
+    this.emit('phase:fail', { phaseId: id, phaseName: name, durationMs, error } satisfies PhaseFailEvent);
+    globalBus.emit('pipeline:event', { jobId: this.jobId, event: { type: 'phase:fail', timestamp: Date.now(), phaseId: id, phaseName: name, durationMs, error } });
   }
 
   private taskUpdate(row: TaskUpdateEvent): void {
     this.emit('task:update', row);
+    globalBus.emit('pipeline:event', { jobId: this.jobId, event: { type: 'task:update', timestamp: Date.now(), ...row } });
   }
 
   // ── Phase 1: Repository Analysis ─────────────────────────────────────────────
@@ -159,6 +186,7 @@ export class Orchestrator extends EventEmitter {
         this.sophosConfig,
         this.orchestratorConfig.target_dir,
         this.orchestratorConfig.user_request,
+        this.llm,
       );
       this.phaseLine(ID, `Stack: ${this.contextPackage.technology_stack.languages.join(', ')}`);
       this.phaseLine(ID, `Files: ${this.contextPackage.repository_summary.file_count}`);
@@ -179,7 +207,7 @@ export class Orchestrator extends EventEmitter {
       if (!this.contextPackage) throw new Error('Context package not available');
       this.phaseLine(ID, 'Spawning 8 planning agents…');
       this.implementationSpec = await executePlanningSwarm(
-        this.sophosConfig, this.contextPackage, this.orchestratorConfig.user_request,
+        this.sophosConfig, this.contextPackage, this.orchestratorConfig.user_request, this.llm,
       );
       this.phaseLine(ID, `Architecture: ${this.implementationSpec.architecture?.diagram?.slice(0, 60) ?? 'defined'}`);
       this.phaseLine(ID, `Files to create: ${this.implementationSpec.files_to_create?.length ?? 0}`);
@@ -201,14 +229,14 @@ export class Orchestrator extends EventEmitter {
       if (!this.implementationSpec) throw new Error('Spec not available');
       this.phaseLine(ID, 'Building task graph…');
       this.taskGraph = await executeExecutionPlanning(
-        this.sophosConfig, this.implementationSpec, this.contextPackage, this.orchestratorConfig.target_dir,
+        this.sophosConfig, this.implementationSpec, this.contextPackage, this.orchestratorConfig.target_dir, this.llm,
       );
       this.phaseLine(ID, `Tasks:          ${this.taskGraph.tasks.length}`);
       this.phaseLine(ID, `Parallel groups:${this.taskGraph.parallel_groups.length}`);
       this.phaseLine(ID, `Critical path:  ${this.taskGraph.critical_path.length} tasks`);
       // Pre-populate task grid
       for (const task of this.taskGraph.tasks) {
-        this.taskUpdate({ id: task.task_id, description: task.objective.slice(0, 40), status: 'queue' });
+        this.taskUpdate({ id: task.task_id, description: task.objective.slice(0, 40), status: 'queue', effort: task.effort });
       }
       this.phaseDone(ID, NAME, t);
       return { phase: ID as PhaseId, status: 'passed', output: this.taskGraph, duration_ms: Date.now() - t, errors: [] };
@@ -238,7 +266,7 @@ export class Orchestrator extends EventEmitter {
       }
 
       this.codingOutputs = await executeCodingSwarm(
-        this.sophosConfig, this.taskGraph, this.orchestratorConfig.target_dir,
+        this.sophosConfig, this.taskGraph, this.orchestratorConfig.target_dir, this.llm,
       );
 
       for (const [taskId] of this.codingOutputs) {
@@ -266,9 +294,9 @@ export class Orchestrator extends EventEmitter {
 
       this.phaseLine(ID, 'Running 5 reviewers per task…');
       this.reviewResults = await executeCodeReview(
-        this.sophosConfig, this.codingOutputs, this.orchestratorConfig.target_dir,
+        this.sophosConfig, this.codingOutputs, this.orchestratorConfig.target_dir, this.llm,
       );
-      this.consensusResult = await buildReviewConsensus(this.sophosConfig, this.reviewResults);
+      this.consensusResult = await buildReviewConsensus(this.sophosConfig, this.reviewResults, this.llm);
 
       // Update task grid with review scores
       let idx = 0;
@@ -339,7 +367,7 @@ export class Orchestrator extends EventEmitter {
           }
         }
       }
-      this.securityFindings = await executeSecuritySwarm(this.sophosConfig, fileContents);
+      this.securityFindings = await executeSecuritySwarm(this.sophosConfig, fileContents, this.llm);
       const actionable = filterActionableFindings(this.securityFindings);
       this.phaseLine(ID, `AuthZ:        ✅ scanned`);
       this.phaseLine(ID, `Injection:    ✅ scanned`);
@@ -407,6 +435,7 @@ export class Orchestrator extends EventEmitter {
         this.codingOutputs || new Map(),
         this.securityFindings || [],
         this.validationResult || fallbackValidation,
+        this.llm,
       );
       for (const check of qaResult.checks) {
         this.phaseLine(ID, `${check.passed ? '✅' : '❌'} ${check.name}`);

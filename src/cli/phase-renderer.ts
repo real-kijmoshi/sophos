@@ -385,7 +385,7 @@ export class PhaseRenderer {
     const output       = lines.join('\n');
     const newLineCount = (output.match(/\n/g) ?? []).length + 1;
     let   buf          = '';
-    if (this.linesRendered > 0) buf += `\x1B[${this.linesRendered}A\x1B[0J`;
+    if (this.linesRendered > 0) buf += `\x1B[${Math.min(this.linesRendered, newLineCount + 10)}A\x1B[0J`;
     buf += output;
     process.stdout.write(buf);
     this.linesRendered = newLineCount;
@@ -454,7 +454,7 @@ export class PhaseRenderer {
     if (completed.length < ETA_SAMPLES) return null;
 
     const avgDuration = completed.reduce((sum, p) => sum + (p.durationMs ?? 0), 0) / completed.length;
-    const remaining = [...this.phases.values()].filter(p => p.status === 'pending' || p.status === 'running').length;
+    const remaining = [...this.phases.values()].filter(p => p.status === 'pending').length;
     const etaMs = avgDuration * remaining;
 
     if (etaMs < 1000) return '<1s';
@@ -484,11 +484,12 @@ export class PhaseRenderer {
 }
 
 function appendToken(stream: string, token: string): string {
+  const cols = W() - 8;
   let s     = stream + token;
   const ls  = s.split('\n');
   const last = ls[ls.length - 1];
-  if (last.length > STREAM_COLS) {
-    const cut = last.lastIndexOf(' ', STREAM_COLS);
+  if (last.length > cols) {
+    const cut = last.lastIndexOf(' ', cols);
     if (cut > 0) {
       ls[ls.length - 1] = last.slice(0, cut);
       ls.push(last.slice(cut + 1));

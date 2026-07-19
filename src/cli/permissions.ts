@@ -13,6 +13,20 @@ export class PermissionSystem {
   private sessionOverrides: Map<string, 'allow' | 'deny'> = new Map();
   private ephemeralAllow: Set<string> = new Set();
 
+  private static RISK_BADGES: Record<string, string> = {
+    'rm':      '🔴 destructive',
+    'sudo':    '🔴 destructive',
+    'push':    '🔴 push to remote',
+    'delete':  '🔴 destructive',
+    'write':   '🟡 modifies files',
+    'edit':    '🟡 modifies files',
+    'commit':  '🟡 creates commit',
+    'checkout':'🟡 switches branch',
+    'bash':    '🟡 shell command',
+    'git':     '🟡 git operation',
+    'rename':  '🟡 renames file',
+  };
+
   constructor() {
     this.rules = {
       read:     [{ pattern: '*', action: 'allow' }],
@@ -48,7 +62,7 @@ export class PermissionSystem {
       if (this.matches(rule.pattern, target)) {
         if (rule.action === 'ask') {
           if (!promptFn) return 'deny';
-          const allowed = await promptFn(`Allow ${tool} on "${this.truncateTarget(target)}"?`);
+          const allowed = await promptFn(this.formatPrompt(tool, target));
           if (allowed) this.ephemeralAllow.add(ephemeralKey);
           return allowed ? 'allow' : 'deny';
         }
@@ -59,7 +73,7 @@ export class PermissionSystem {
     const defaultAction = this.defaults[tool] || 'ask';
     if (defaultAction === 'ask') {
       if (!promptFn) return 'deny';
-      const allowed = await promptFn(`Allow ${tool} on "${this.truncateTarget(target)}"?`);
+      const allowed = await promptFn(this.formatPrompt(tool, target));
       if (allowed) this.ephemeralAllow.add(ephemeralKey);
       return allowed ? 'allow' : 'deny';
     }
@@ -86,6 +100,21 @@ export class PermissionSystem {
 
   private truncateTarget(target: string): string {
     return target.length > 50 ? target.slice(0, 47) + '...' : target;
+  }
+
+  private getRiskHint(tool: ToolName, target: string): string {
+    // Check target-specific risk first
+    for (const [keyword, badge] of Object.entries(PermissionSystem.RISK_BADGES)) {
+      if (target.toLowerCase().includes(keyword)) return ` (${badge})`;
+    }
+    // Check tool-level risk
+    if (PermissionSystem.RISK_BADGES[tool]) return ` (${PermissionSystem.RISK_BADGES[tool]})`;
+    return '';
+  }
+
+  private formatPrompt(tool: ToolName, target: string): string {
+    const risk = this.getRiskHint(tool, target);
+    return `Allow ${tool} on "${this.truncateTarget(target)}"?${risk}`;
   }
 
   getSummary(): string[] {

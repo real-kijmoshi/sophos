@@ -2,6 +2,7 @@
 
 import * as path from 'node:path';
 import * as fs   from 'node:fs';
+import pkg from '../package.json';
 import { SophosREPL }                           from './cli/repl.js';
 import { Orchestrator }                         from './orchestrator.js';
 import { loadConfig, getDefaultConfigPath }     from './config/config.js';
@@ -78,8 +79,8 @@ function parseArgs(): CLIOptions {
 }
 
 function printHelp(): void {
-  console.log(banner());
-  console.log(helpPanel());
+  console.log(banner({ version: pkg.version }));
+  console.log(helpPanel(pkg.version));
   console.log(`
   ${c.accent.bold('CLI OPTIONS')}
     ${c.primary('-t, --target')} <dir>       ${c.muted('Target directory (default: cwd)')}
@@ -136,6 +137,21 @@ async function main(): Promise<void> {
 }
 
 async function runInteractiveMode(opts: CLIOptions): Promise<void> {
+  // If a WebUI port was explicitly requested alongside TUI, start the server
+  // in the background — same process, same globalBus, so all pipeline events
+  // are visible in the browser in real time.
+  if (opts.webuiPort) {
+    const { WebUIServer } = await import('./webui/server.js');
+    const srv = new WebUIServer({
+      port:      opts.webuiPort,
+      host:      '0.0.0.0',
+      targetDir: opts.targetDir,
+      verbose:   opts.verbose,
+      dryRun:    opts.dryRun,
+    });
+    await srv.start();
+  }
+
   // Real terminal → full-screen TUI. Pipes / CI → line-based REPL fallback.
   if (process.stdin.isTTY && process.stdout.isTTY) {
     const { TuiApp } = await import('./cli/tui/app.js');
@@ -186,7 +202,7 @@ async function runMCPMode(opts: CLIOptions): Promise<void> {
 }
 
 async function runBatchMode(opts: CLIOptions): Promise<void> {
-  console.log(banner());
+  console.log(banner({ version: pkg.version }));
   console.log(statusBar({ connected: true, model: opts.model || 'auto' }));
   console.log(`\n  ${c.muted('Target:')}  ${c.accent(opts.targetDir)}`);
   console.log(`  ${c.muted('Request:')} ${c.text(opts.request)}`);

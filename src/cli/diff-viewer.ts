@@ -137,7 +137,6 @@ export class InteractiveDiffViewer {
 
     // Header bar
     const fileLabel = `${this.currentFile + 1}/${this.files.length}  ${file.name}`;
-    const stats = `+${file.addCount} -${file.delCount}`;
     lines.push(`  ${c.accent.bold(fileLabel)}  ${c.success(`+${file.addCount}`)} ${c.error(`-${file.delCount}`)}`);
     lines.push('  ' + c.dim('─'.repeat(w - 2)));
 

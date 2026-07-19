@@ -232,33 +232,79 @@ Respond with JSON:
   // PHASE 2 — Consensus Merging
   // ═══════════════════════════════════════════════════════════════════════════
 
-  consensusMerge: (plannerOutputs: string, userRequest: string) => ({
-    system: `You are a Synthesizer Agent merging 8 independent planner proposals into a single coherent implementation specification. You must resolve conflicts and produce a unified plan. Respond with valid JSON only.`,
-    user: `Merge these 8 planner proposals into a single implementation specification. Resolve any conflicts by choosing the best approach. Detect file overlaps and resolve them.
+  /**
+   * Pass 1 — Deduplication.
+   * Fast pre-pass that collapses duplicate files/deps/APIs across 8 planners
+   * into a short deduplicated list before the main spec synthesis.
+   */
+  consensusDedup: (plannerOutputs: string, userRequest: string) => ({
+    system: `You are a deduplication agent. Your only job is to collapse redundant entries from multiple planner proposals into a single clean list. Respond with valid JSON only. Be concise — no explanations.`,
+    user: `Deduplicate these planner proposals for request: "${userRequest}"
 
-USER REQUEST: ${userRequest}
-
-PLANNER PROPOSALS:
 ${plannerOutputs}
 
-Respond with a complete ImplementationSpecification JSON:
+Return JSON with deduplicated, merged lists:
 {
-  "architecture": {"diagram": "string", "components": [{"name": "string", "responsibilities": ["string"]}], "interfaces": [{"name": "string", "methods": ["string"]}]},
-  "folder_structure": {"add": ["string"], "modify": ["string"], "delete": ["string"]},
-  "files_to_create": [{"path": "string", "template": "string", "purpose": "string"}],
-  "files_to_edit": [{"path": "string", "changes": [{"type": "import|modify|create", "description": "string"}], "reason": "string"}],
-  "apis": [{"method": "string", "path": "string", "request": {}, "response": {}, "auth": "string"}],
-  "services": [{"name": "string", "responsibilities": ["string"], "dependencies": ["string"]}],
-  "components": [{"name": "string", "responsibilities": ["string"]}],
-  "database_schema": {"tables": [], "migrations": [], "indexes": []},
-  "dependencies": {"add": [{"name": "string", "version": "string", "reason": "string"}], "remove": [], "update": []},
-  "configuration": {"env_vars": [{"name": "string", "required": boolean, "description": "string"}], "config_files": []},
-  "testing_strategy": {"unit": ["string"], "integration": ["string"], "e2e": ["string"]},
-  "security_requirements": [{"category": "string", "requirement": "string", "verification": "string"}],
-  "performance_goals": [{"metric": "string", "target": "string", "measurement": "string"}],
-  "rollback_strategy": {"steps": ["string"], "triggers": ["string"]},
-  "implementation_order": [{"task_id": "TASK-001", "phase": "coding", "dependencies": [], "description": "string"}]
-}`
+  "files_to_create": [{"path": "string", "purpose": "string"}],
+  "files_to_edit":   [{"path": "string", "reason": "string"}],
+  "apis":            [{"method": "string", "path": "string"}],
+  "dependencies":    {"add": [{"name": "string", "version": "string", "reason": "string"}]},
+  "env_vars":        [{"name": "string", "required": boolean, "description": "string"}],
+  "db_tables":       ["string"],
+  "services":        [{"name": "string", "responsibilities": ["string"]}],
+  "components":      ["string"],
+  "security":        [{"category": "string", "requirement": "string"}],
+  "impl_order":      [{"task_id": "TASK-001", "description": "string", "effort": "small|medium|large", "dependencies": []}]
+}
+
+Rules:
+- Merge identical or near-identical file paths into one entry, keeping the most descriptive purpose/reason.
+- For dependencies, keep the newest/most-specific version.
+- For impl_order, assign sequential TASK-001, TASK-002 … IDs and preserve dependency relationships.`,
+  }),
+
+  /**
+   * Pass 2 — Spec synthesis.
+   * Receives the deduplicated list and produces the full ImplementationSpecification.
+   */
+  consensusMerge: (dedupOutput: string, plannerSummaries: string, userRequest: string) => ({
+    system: `You are a Synthesizer Agent. Produce a single coherent ImplementationSpecification JSON from deduplicated planner data. Respond with valid JSON only — no prose, no markdown fences.
+
+Output schema:
+{
+  "architecture": {
+    "diagram": "string",
+    "components": [{"name":"string","responsibilities":["string"]}],
+    "interfaces": [{"name":"string","methods":["string"]}]
+  },
+  "folder_structure": {"add":["string"],"modify":["string"],"delete":["string"]},
+  "files_to_create": [{"path":"string","template":"string","purpose":"string"}],
+  "files_to_edit":   [{"path":"string","changes":[{"type":"import|modify|create|delete","description":"string"}],"reason":"string"}],
+  "apis":            [{"method":"string","path":"string","request":{},"response":{},"auth":"string"}],
+  "services":        [{"name":"string","responsibilities":["string"],"dependencies":["string"]}],
+  "components":      [{"name":"string","responsibilities":["string"]}],
+  "database_schema": {"tables":[{"name":"string","columns":[{"name":"string","type":"string","nullable":true}]}],"migrations":[],"indexes":[]},
+  "dependencies":    {"add":[{"name":"string","version":"string","reason":"string"}],"remove":[],"update":[]},
+  "configuration":   {"env_vars":[{"name":"string","required":true,"description":"string"}],"config_files":[]},
+  "testing_strategy":{"unit":["string"],"integration":["string"],"e2e":["string"]},
+  "security_requirements":[{"category":"string","requirement":"string","verification":"string"}],
+  "performance_goals":    [{"metric":"string","target":"string","measurement":"string"}],
+  "rollback_strategy":    {"steps":["string"],"triggers":["string"]},
+  "implementation_order": [{"task_id":"TASK-001","phase":"coding","dependencies":[],"description":"string","effort":"small|medium|large"}]
+}`,
+    user: `Synthesize a complete ImplementationSpecification for: "${userRequest}"
+
+DEDUPLICATED PLAN:
+${dedupOutput}
+
+PLANNER HIGHLIGHTS (for architecture/testing/security/performance context):
+${plannerSummaries}
+
+Instructions:
+- Use the deduplicated plan as the authoritative source for files, APIs, deps, tasks.
+- Derive architecture, testing strategy, security requirements, and performance goals from the planner highlights.
+- Ensure implementation_order tasks cover all files_to_create and files_to_edit with correct dependencies.
+- Keep template fields empty string — coding agents will fill them in.`,
   }),
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -285,7 +331,8 @@ Respond with JSON array of tasks:
   "dependencies": ["string (task_ids this depends on)"],
   "acceptance_criteria": ["string"],
   "test_requirements": ["string"],
-  "prompt_for_coding_agent": "string (complete, self-contained instruction the coding agent will execute)"
+  "prompt_for_coding_agent": "string (complete, self-contained instruction the coding agent will execute)",
+  "effort": "small|medium|large"
 }]
 
 IMPORTANT: Each prompt_for_coding_agent must be complete enough that an AI coding agent can execute it without seeing other tasks. Include file paths, code style, expected behavior, and edge cases.`

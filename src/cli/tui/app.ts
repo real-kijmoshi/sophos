@@ -17,6 +17,7 @@
 
 import * as path from 'node:path';
 import { format } from 'node:util';
+import pkg from '../../../package.json';
 import { Screen }         from './screen.js';
 import { Transcript }     from './transcript.js';
 import { LineEditor }     from '../editor.js';
@@ -318,7 +319,7 @@ export class TuiApp {
       commits:   this.commitCount,
       model:     this.modelSelector.getCurrentModel() || undefined,
     }));
-    process.exit(0);
+    process.stdout.write('\n', () => process.exit(0));
   }
 
   // ── Sessions ────────────────────────────────────────────────────────────────
@@ -718,10 +719,15 @@ export class TuiApp {
   }
 
   private handleEscape(): boolean {
-    if (this.editor.getLine().length > 0) return false; // editor clears the line
     const s = this.active;
+    if (s.running) {
+      this.awaitingConfirm = true;
+      this.pendingConfirmAction = () => { s.abortCtrl?.abort(); return Promise.resolve(); };
+      this.dirty = true;
+      return true;
+    }
+    if (this.editor.getLine().length > 0) return false; // editor clears the line
     if (s.transcript.scrollOffset > 0) { s.transcript.toBottom(); this.dirty = true; return true; }
-    if (s.running) { s.abortCtrl?.abort(); return true; }
     return false;
   }
 
@@ -789,7 +795,7 @@ export class TuiApp {
     const intent = parseIntent(input);
     switch (intent.type) {
       case 'exit':    this.quit(); return;
-      case 'help':    s.transcript.push(helpPanel()); return;
+      case 'help':    s.transcript.push(helpPanel(pkg.version)); return;
       case 'command': await this.runCmd(s, '/' + input.replace(/^\//, '')); return;
       case 'rollback':
         this.awaitingConfirm = true;
@@ -1002,7 +1008,7 @@ export class TuiApp {
       spinner.setText('Committing…');
       try {
         const hash = await this.git.commit(msg);
-        if (!hash) { spinner.stop(); console.log(`  Nothing to commit — all clean.`); s.lastSuccess = false; return; }
+        if (!hash) { spinner.stop(); s.transcript.pushRaw(`  ${c.muted('Nothing to commit — all clean.')}`); s.lastSuccess = false; return; }
         this.commitCount++;
         spinner.succeed(`Committed  ${hash.slice(0, 8)}  "${msg}"`);
         const hasRemote = await this.git.hasRemote();
@@ -1012,7 +1018,7 @@ export class TuiApp {
           if (pushed) spinner.succeed('Pushed to remote');
           else        spinner.warn('Push failed — commit is local');
         } else {
-          console.log('  No remote configured — commit is local only.');
+          s.transcript.pushRaw(`  ${c.muted('No remote configured — commit is local only.')}`);
         }
         tray.success(`Committed ${hash.slice(0, 8)}`);
       } catch (err: any) {
@@ -1025,12 +1031,12 @@ export class TuiApp {
   private async doRollback(s: TuiSession): Promise<void> {
     await this.runCaptured(s, async () => {
       const log = await this.git.getLog(1);
-      if (!log.length) { console.log('  No commits to roll back.'); return; }
-      console.log(`  ⚠  Last commit: ${log[0].hash} ${log[0].message}`);
+      if (!log.length) { s.transcript.pushRaw(`  ${c.muted('No commits to roll back.')}`); return; }
+      s.transcript.pushRaw(`  ${c.warning('⚠')}  Last commit: ${log[0].hash} ${log[0].message}`);
       const ok = await this.git.stash();
-      console.log(ok
-        ? '  ✓ Changes stashed.  /git stash pop to restore.'
-        : '  ✗ Stash failed.');
+      s.transcript.pushRaw(ok
+        ? `  ${c.success('✓')} Changes stashed.  /git stash pop to restore.`
+        : `  ${c.error('✗')} Stash failed.`);
     });
   }
 

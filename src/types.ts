@@ -183,6 +183,7 @@ export interface TaskDefinition {
   phase: string;
   dependencies: string[];
   description: string;
+  effort: 'small' | 'medium' | 'large';
 }
 
 export interface ImplementationSpecification {
@@ -234,6 +235,7 @@ export interface TaskPrompt {
   acceptance_criteria: string[];
   test_requirements: string[];
   prompt_for_coding_agent: string;
+  effort?: 'small' | 'medium' | 'large';
 }
 
 export interface TaskGraph {

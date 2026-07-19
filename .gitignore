@@ -7,3 +7,4 @@ test/
 !src/**/*.ts
 bun.lock
 .sophos/
+.claude

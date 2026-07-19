@@ -23,7 +23,7 @@ export interface ParsedIntent {
 // ── Autocomplete tree ─────────────────────────────────────────────────────────
 // Maps every slash command to its valid subcommands/args for Tab completion.
 export const COMMAND_COMPLETIONS: Record<string, string[]> = {
-  '/models':       ['set', 'small', 'large', 'suggest', 'save', 'list', 'wizard', 'install', 'offline'],
+  '/models':       ['assign', 'coder', 'planner', 'executor', 'chat', 'scanner', 'architect', 'base', 'small', 'large', 'set', 'suggest', 'save', 'list', 'wizard', 'install', 'offline'],
   '/models save':  ['local', 'global'],
   '/git':          ['status', 'log', 'diff', 'commit', 'branch', 'stash'],
   '/git stash':    ['pop'],
@@ -33,7 +33,10 @@ export const COMMAND_COMPLETIONS: Record<string, string[]> = {
   '/todo':         ['add', 'list', 'done', 'clear'],
   '/help':         [
     'models', 'git', 'diff', 'plan', 'security', 'cost',
-    'rollback', 'config', 'compact', 'clear', 'exit', 'status',
+    'rollback', 'config', 'compact', 'clear', 'exit', 'status', 'hw',
+    'webui', 'mcp', 'tunnel', 'notifications', 'inspect', 'todo',
+    'tasks', 'sessions', 'export', 'permissions', 'resume', 'stream',
+    'auto-compact',
   ],
   '/notifications': ['clear'],
   '/config':        ['init'],
@@ -68,6 +71,7 @@ export const ALL_COMMANDS: Array<{ name: string; desc: string; aliases?: string[
   { name: '/webui',         desc: 'start WebUI server' },
   { name: '/mcp',           desc: 'start MCP server' },
   { name: '/tunnel',        desc: 'expose port via tunnel' },
+  { name: '/hw',            desc: 'hardware diagnostics',                aliases: ['/hardware', '/gpu'] },
   { name: '/help',          desc: 'show commands',                     aliases: ['/h', '/?'] },
   { name: '/exit',          desc: 'quit',                              aliases: ['/quit', '/q'] },
 ];
@@ -127,6 +131,12 @@ const NL_COMPLETIONS: Record<string, string[]> = {
   'explain ':    ['explain the auth flow', 'explain the database schema', 'explain the error'],
   'optimize ':   ['optimize database queries', 'optimize bundle size', 'optimize API performance'],
   'debug ':      ['debug the authentication issue', 'debug the memory leak', 'debug the race condition'],
+  'remove ':     ['remove unused dependencies', 'remove dead code', 'remove the deprecated API endpoint'],
+  'delete ':     ['delete the orphaned records', 'delete unused files', 'delete the stale cache entries'],
+  'check ':      ['check for security vulnerabilities', 'check test coverage', 'check for type errors'],
+  'test ':       ['test the login flow', 'test the API endpoints', 'test error handling'],
+  'update ':     ['update dependencies', 'update the README', 'update the database schema'],
+  'improve ':    ['improve error messages', 'improve test coverage', 'improve performance'],
 };
 
 // ── Repo context for smarter suggestions ─────────────────────────────────────

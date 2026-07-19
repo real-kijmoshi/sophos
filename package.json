@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "bun src/index.ts",
+    "dev-webui": "bun src/index.ts --webui-port 3777",
     "start": "bun src/index.ts",
     "build": "bun build src/index.ts --outfile dist/sophos.js --target bun --banner '#!/usr/bin/env bun'",
     "typecheck": "tsc --noEmit",

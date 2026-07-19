@@ -199,6 +199,7 @@ export class LineEditor {
           this.belowCount = 0;
           this.render();
           return;
+        case 'z': return; // ignore suspend (SIGTSTP) — keep TUI alive
         case 'left':  this.wordLeft();  this.render(); return;
         case 'right': this.wordRight(); this.render(); return;
         default:
@@ -268,15 +269,15 @@ export class LineEditor {
 
   private wordLeft(): void {
     let i = this.cursor;
-    while (i > 0 && this.line[i - 1] === ' ') i--;
-    while (i > 0 && this.line[i - 1] !== ' ') i--;
+    while (i > 0 && /\s/.test(this.line[i - 1])) i--;
+    while (i > 0 && /\S/.test(this.line[i - 1])) i--;
     this.cursor = i;
   }
 
   private wordRight(): void {
     let i = this.cursor;
-    while (i < this.line.length && this.line[i] === ' ') i++;
-    while (i < this.line.length && this.line[i] !== ' ') i++;
+    while (i < this.line.length && /\s/.test(this.line[i])) i++;
+    while (i < this.line.length && /\S/.test(this.line[i])) i++;
     this.cursor = i;
   }
 
@@ -418,8 +419,15 @@ export function truncateAnsi(s: string, width: number): string {
   let i       = 0;
   while (i < s.length) {
     if (s[i] === '\x1B') {
-      const m = /^\x1B\[[0-9;]*[A-Za-z]/.exec(s.slice(i));
-      if (m) { out += m[0]; i += m[0].length; continue; }
+      // CSI: ESC [ ... letter
+      const csi = /^\x1B\[[0-9;]*[A-Za-z]/.exec(s.slice(i));
+      if (csi) { out += csi[0]; i += csi[0].length; continue; }
+      // DEC private: ESC [ ? ... letter
+      const dec = /^\x1B\[\?[0-9;]*[A-Za-z]/.exec(s.slice(i));
+      if (dec) { out += dec[0]; i += dec[0].length; continue; }
+      // OSC: ESC ] ... (BEL or ST)
+      const osc = /^\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/.exec(s.slice(i));
+      if (osc) { out += osc[0]; i += osc[0].length; continue; }
     }
     if (visible >= width) break;
     out += s[i];

@@ -6,7 +6,7 @@ import * as readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { OllamaClient }    from '../llm/client.js';
 import { loadConfig, saveLocalConfig, saveGlobalConfig, getGlobalConfigPath, getDefaultConfigPath } from '../config/config.js';
-import { c, formatNumber } from './ui.js';
+import { c, formatNumber, ANSI } from './ui.js';
 
 // ── Curated model catalogue ───────────────────────────────────────────────────
 // Source: ollama.com/library — models known to work well with SOPHOS.
@@ -217,8 +217,45 @@ export class ModelSelector {
     return false;
   }
 
+  // ── Role definitions ──────────────────────────────────────────────────────────
+  private static ROLES: Array<{
+    key:       'smallModel' | 'currentModel' | 'largeModel' | 'coderModel' | 'plannerModel' | 'executorModel' | 'chatModel';
+    tier:      'small' | 'medium' | 'large' | 'coder' | 'planner' | 'executor' | 'chat';
+    label:     string;
+    icon:      string;
+    color:     (s: string) => string;
+    desc:      string;
+    phaseHint: string;
+  }> = [
+    { key: 'smallModel',     tier: 'small',    label: 'scanner',   icon: '🔍', color: c.muted,     desc: 'repo scanning, validation, integration', phaseHint: 'phase 1, 6, 8' },
+    { key: 'currentModel',   tier: 'medium',   label: 'base',      icon: '⚙️', color: c.secondary,  desc: 'base model (medium tier default)',         phaseHint: 'fallback' },
+    { key: 'largeModel',     tier: 'large',    label: 'architect', icon: '🧠', color: c.warning,   desc: 'deep analysis, complex reasoning',         phaseHint: 'fallback' },
+    { key: 'coderModel',     tier: 'coder',    label: 'coder',     icon: '💻', color: c.primary,   desc: 'code generation, review, QA',             phaseHint: 'phase 4, 5, 7, 9' },
+    { key: 'plannerModel',   tier: 'planner',  label: 'planner',   icon: '📋', color: c.purple,    desc: 'planning swarm, consensus, synthesis',     phaseHint: 'phase 2, 5-consensus, 7-deep' },
+    { key: 'executorModel',  tier: 'executor', label: 'executor',  icon: '⚡', color: c.orange,    desc: 'execution planning, task graph',           phaseHint: 'phase 3' },
+    { key: 'chatModel',      tier: 'chat',     label: 'chat',      icon: '💬', color: c.info,      desc: 'conversational, REPL, explanations',       phaseHint: '/chat' },
+  ];
+
+  private getRoleValue(role: typeof ModelSelector.ROLES[number]): string {
+    return (this as any)[role.key] as string;
+  }
+
+  private setRoleValue(role: typeof ModelSelector.ROLES[number], model: string): void {
+    (this as any)[role.key] = model;
+    const envMap: Record<string, string> = {
+      smallModel:    'SOPHOS_MODEL_SMALL',
+      currentModel:  'SOPHOS_MODEL_MEDIUM',
+      largeModel:    'SOPHOS_MODEL_LARGE',
+      coderModel:    'SOPHOS_MODEL_CODER',
+      plannerModel:  'SOPHOS_MODEL_PLANNER',
+      executorModel: 'SOPHOS_MODEL_EXECUTOR',
+      chatModel:     'SOPHOS_MODEL_CHAT',
+    };
+    process.env[envMap[role.key]] = model;
+  }
+
   /**
-   * Show the model status panel (used by /models with no args).
+   * Show the model status panel — all 7 roles with their assigned models.
    * If unconfigured, shows the setup guide inline.
    */
   formatModelList(): string {
@@ -238,36 +275,41 @@ export class ModelSelector {
       return lines.join('\n');
     }
 
-    // ── Installed models table ────────────────────────────────────────────────
-    lines.push(`  ${c.accent.bold('Installed Models')}\n`);
-    lines.push(`  ${c.muted('Name'.padEnd(38))}  ${c.muted('Tier'.padEnd(10))}  ${c.muted('Role')}`);
-    lines.push(`  ${'─'.repeat(72)}`);
+    // ── Role assignment table ──────────────────────────────────────────────────
+    lines.push(`  ${c.accent.bold('Model Roles')}\n`);
 
-    for (const m of this.models) {
-      const isSmall  = m === this.smallModel;
-      const isMedium = m === this.currentModel;
-      const isLarge  = m === this.largeModel;
-      const tierLabel = isSmall ? c.muted('small') : isMedium ? c.primary('medium') : isLarge ? c.warning('large') : c.dim('—');
-      const role      = isSmall ? c.muted('repo analysis, validation') : isMedium ? c.primary('coding, review, QA') : isLarge ? c.warning('planning, security') : c.dim('unassigned');
-      const active    = (isSmall || isMedium || isLarge) ? c.success(' ✓') : '';
-      lines.push(`  ${c.text(m.padEnd(38))}  ${tierLabel.padEnd(10)}  ${role}${active}`);
+    const roleW = 10, modelW = 30, descW = 32;
+    lines.push(`  ${c.muted('Role'.padEnd(roleW))}  ${c.muted('Model'.padEnd(modelW))}  ${c.muted('Used by')}`);
+    lines.push(`  ${c.dim('─'.repeat(roleW + modelW + descW + 4))}`);
+
+    for (const role of ModelSelector.ROLES) {
+      const model = this.getRoleValue(role);
+      const isActive  = !!model;
+      const isInstalled = model ? this.models.includes(model) : false;
+      const modelStr = model
+        ? (isInstalled ? role.color(model) : c.warning(model + ' ⚠'))
+        : c.dim('— not set —');
+      const check = isActive ? (isInstalled ? c.success(' ✓') : c.warning(' ⚠')) : '';
+      lines.push(`  ${role.icon} ${c.dim(role.label.padEnd(roleW - 3))}  ${modelStr.padEnd(modelW + (isActive ? 0 : 0))}  ${c.dim(role.desc)}${check}`);
     }
     lines.push('');
 
-    // ── Tier summary ──────────────────────────────────────────────────────────
-    lines.push(`  ${c.accent.bold('Active Tiers')}`);
-    lines.push(`  ${c.muted('Small  (analysis):   ')} ${this.smallModel   || c.warning('not set')}`);
-    lines.push(`  ${c.muted('Medium (coding):     ')} ${this.currentModel || c.warning('not set')}`);
-    lines.push(`  ${c.muted('Large  (planning):   ')} ${this.largeModel   || c.warning('not set')}`);
-    lines.push('');
-    lines.push(`  ${c.dim('Commands:')}  ${c.muted('/models set <name>')}  ${c.muted('/models small <name>')}  ${c.muted('/models large <name>')}`);
-    lines.push(`            ${c.muted('/models suggest')} ${c.dim('— show recommended downloads')}`);
+    // ── Quick commands ─────────────────────────────────────────────────────────
+    lines.push(`  ${c.dim('Set role:')}  ${c.muted('/models coder <name>')}  ${c.muted('/models planner <name>')}  ${c.muted('/models executor <name>')}`);
+    lines.push(`               ${c.muted('/models chat <name>')}     ${c.muted('/models scanner <name>')}   ${c.muted('/models architect <name>')}`);
+    lines.push(`  ${c.dim('Other:')}    ${c.primary('/models suggest')} ${c.dim('— smart upgrade suggestions')}   ${c.primary('/models wizard')} ${c.dim('— interactive setup')}`);
+    lines.push(`               ${c.primary('/models assign')}  ${c.dim('— interactive role assignment')}  ${c.primary('/models save local|global')}`);
 
-    // ── Not-installed recommendations ─────────────────────────────────────────
-    const missing = this.getMissingRecommendations();
+    // ── Not-installed warnings ─────────────────────────────────────────────────
+    const unassigned = ModelSelector.ROLES.filter(r => !this.getRoleValue(r));
+    const missing    = this.getMissingRecommendations();
+    if (unassigned.length) {
+      lines.push('');
+      lines.push(`  ${c.warning('⚠')} ${c.warning(`${unassigned.length} role(s) unassigned`)} — ${c.dim('run')} ${c.primary('/models assign')} ${c.dim('to configure')}`);
+    }
     if (missing.length) {
       lines.push('');
-      lines.push(`  ${c.warning('💡 Recommended upgrades')}`);
+      lines.push(`  ${c.dim('Suggested downloads:')}`);
       for (const spec of missing.slice(0, 3)) {
         lines.push(`  ${c.dim('•')} ${c.accent(`ollama pull ${spec.name}`)}  ${c.muted(`${spec.size_gb}GB · ${spec.description}`)}`);
       }
@@ -415,13 +457,13 @@ export class ModelSelector {
 
   getForTier(tier: 'small' | 'medium' | 'large' | 'coder' | 'planner' | 'executor' | 'chat'): string {
     switch (tier) {
-      case 'small':    return this.smallModel    || this.currentModel || this.models[0] || '';
-      case 'medium':   return this.currentModel  || this.smallModel   || this.models[0] || '';
-      case 'large':    return this.largeModel    || this.currentModel || this.models[0] || '';
-      case 'coder':    return this.coderModel    || this.currentModel || this.models[0] || '';
-      case 'planner':  return this.plannerModel  || this.largeModel   || this.models[0] || '';
-      case 'executor': return this.executorModel || this.largeModel   || this.models[0] || '';
-      case 'chat':     return this.chatModel     || this.currentModel || this.models[0] || '';
+      case 'small':    return this.smallModel;
+      case 'medium':   return this.currentModel;
+      case 'large':    return this.largeModel;
+      case 'coder':    return this.coderModel;
+      case 'planner':  return this.plannerModel;
+      case 'executor': return this.executorModel;
+      case 'chat':     return this.chatModel;
     }
   }
 
@@ -438,50 +480,331 @@ export class ModelSelector {
   private autoAssignFromInstalled(): boolean {
     let changed = false;
 
+    // Prefer different models per role — pick by size heuristics
+    const bySize = [...this.models].sort((a, b) => {
+      const parseSize = (m: string) => {
+        const match = m.match(/[:\-](\d+\.?\d*)b/i);
+        return match ? parseFloat(match[1]) : 0;
+      };
+      return parseSize(a) - parseSize(b);
+    });
+
+    const smallest  = bySize[0]  || '';
+    const biggest   = bySize[bySize.length - 1] || '';
+    const mid       = bySize[Math.floor(bySize.length / 2)] || '';
+    const used      = new Set<string>();
+
+    const pick = (candidates: string[]) => {
+      for (const c of candidates) {
+        if (this.models.includes(c) && !used.has(c)) { used.add(c); return c; }
+      }
+      return '';
+    };
+
     if (!this.smallModel || !this.models.includes(this.smallModel)) {
-      const m = this.bestForTier('small');
-      if (m) { this.smallModel = m; changed = true; }
+      this.smallModel = pick([smallest, ...this.models.filter(m => /1b|1\.5b|3b|7b/i.test(m))]) || this.bestForTier('small');
+      if (this.smallModel) changed = true;
     }
     if (!this.currentModel || !this.models.includes(this.currentModel)) {
-      const m = this.bestForTier('medium');
-      if (m) { this.currentModel = m; changed = true; }
+      this.currentModel = pick([mid, ...this.models.filter(m => /7b|8b|9b|12b|14b/i.test(m))]) || this.bestForTier('medium');
+      if (this.currentModel) changed = true;
     }
     if (!this.largeModel || !this.models.includes(this.largeModel)) {
-      const m = this.bestForTier('large');
-      if (m) { this.largeModel = m; changed = true; }
+      this.largeModel = pick([biggest, ...this.models.filter(m => /32b|34b|70b|72b/i.test(m))]) || this.bestForTier('large');
+      if (this.largeModel) changed = true;
     }
     if (!this.coderModel || !this.models.includes(this.coderModel)) {
-      this.coderModel = this.currentModel || this.bestForTier('medium');
-      changed = true;
+      this.coderModel = pick(this.models.filter(m => /coder|codellama|code/i.test(m) && !used.has(m)))
+        || pick(this.models.filter(m => !used.has(m)))
+        || this.bestForTier('medium');
+      if (this.coderModel) changed = true;
     }
     if (!this.plannerModel || !this.models.includes(this.plannerModel)) {
-      this.plannerModel = this.largeModel || this.bestForTier('large');
-      changed = true;
+      this.plannerModel = pick(this.models.filter(m => !used.has(m))) || this.bestForTier('large');
+      if (this.plannerModel) changed = true;
     }
     if (!this.executorModel || !this.models.includes(this.executorModel)) {
-      this.executorModel = this.largeModel || this.bestForTier('large');
-      changed = true;
+      this.executorModel = pick(this.models.filter(m => !used.has(m))) || this.bestForTier('medium');
+      if (this.executorModel) changed = true;
     }
     if (!this.chatModel || !this.models.includes(this.chatModel)) {
-      this.chatModel = this.currentModel || this.bestForTier('medium');
-      changed = true;
+      this.chatModel = pick(this.models.filter(m => /chat|instruct|general/i.test(m) && !used.has(m)))
+        || pick(this.models.filter(m => !used.has(m)))
+        || this.bestForTier('medium');
+      if (this.chatModel) changed = true;
     }
 
     if (changed) {
       console.log('');
-      console.log(`  ${c.success('✓')} Auto-assigned models from installed list:`);
-      console.log(`  ${c.muted('Small:    ')} ${c.text(this.smallModel    || c.warning('none'))}`);
-      console.log(`  ${c.muted('Medium:   ')} ${c.text(this.currentModel  || c.warning('none'))}`);
-      console.log(`  ${c.muted('Large:    ')} ${c.text(this.largeModel    || c.warning('none'))}`);
-      console.log(`  ${c.muted('Coder:    ')} ${c.text(this.coderModel    || c.warning('none'))}`);
-      console.log(`  ${c.muted('Planner:  ')} ${c.text(this.plannerModel  || c.warning('none'))}`);
-      console.log(`  ${c.muted('Executor: ')} ${c.text(this.executorModel || c.warning('none'))}`);
-      console.log(`  ${c.muted('Chat:     ')} ${c.text(this.chatModel     || c.warning('none'))}`);
+      console.log(`  ${c.success('✓')} Auto-assigned models (each role gets a distinct model):`);
+      for (const role of ModelSelector.ROLES) {
+        const val = this.getRoleValue(role);
+        console.log(`  ${role.icon} ${c.dim(role.label.padEnd(9))} ${val ? c.text(val) : c.warning('none')}`);
+      }
       console.log(`  ${c.dim('Run')} ${c.primary('/models save local')} ${c.dim('or')} ${c.primary('/models save global')} ${c.dim('to persist.')}`);
       console.log('');
     }
 
     return changed || (!!this.currentModel);
+  }
+
+  // ── Interactive TUI ──────────────────────────────────────────────────────────
+  /**
+   * Interactive arrow-key model assignment.
+   * For each role, shows a selectable list of installed models.
+   * Returns true if any assignments were made.
+   */
+  async runInteractiveAssign(): Promise<boolean> {
+    if (!this.ollamaOnline) { this.printOllamaOffline(); return false; }
+    if (!this.models.length) { this.printDownloadGuide(); return false; }
+
+    const w = Math.min(process.stdout.columns || 80, 96);
+    let anyChanged = false;
+
+    for (const role of ModelSelector.ROLES) {
+      const current = this.getRoleValue(role);
+      const result  = await this.promptModelPicker(role, current, w);
+      if (result !== null && result !== current) {
+        this.setRoleValue(role, result);
+        anyChanged = true;
+      }
+    }
+
+    if (anyChanged) {
+      console.log('');
+      console.log(`  ${c.success('✓')} Roles updated. ${c.dim('Run')} ${c.primary('/models save local')} ${c.dim('to persist.')}`);
+    }
+    console.log('');
+    return anyChanged;
+  }
+
+  private promptModelPicker(
+    role:     typeof ModelSelector.ROLES[number],
+    current:  string,
+    width:    number,
+  ): Promise<string | null> {
+    return new Promise((resolve) => {
+      let cursor = Math.max(0, this.models.indexOf(current));
+      if (cursor < 0) cursor = 0;
+      let scroll = 0;
+      const maxVisible = Math.min(12, this.models.length);
+      let linesRendered = 0;
+
+      const render = () => {
+        // Clear previous output
+        if (linesRendered > 0) {
+          process.stdout.write(`\x1B[${linesRendered}A\x1B[0J`);
+          linesRendered = 0;
+        }
+
+        const lines: string[] = [];
+        lines.push(`  ${role.icon} ${c.accent.bold(role.label)} ${c.dim('—')} ${c.dim(role.desc)}`);
+        lines.push(`  ${c.dim('phase:')} ${c.muted(role.phaseHint)}`);
+        lines.push('');
+
+        // Model list
+        for (let i = 0; i < maxVisible; i++) {
+          const idx = scroll + i;
+          if (idx >= this.models.length) break;
+          const m = this.models[idx];
+          const isSelected = m === current;
+          const isCursor   = idx === cursor;
+          const prefix     = isCursor ? c.accent.bold('▸ ') : '  ';
+          const check      = isSelected ? c.success(' (current)') : '';
+          const tag        = role.tier === 'small'    && /1b|1\.5b|3b|7b/i.test(m) ? c.dim(' [light]')
+                           : role.tier === 'medium'   && /7b|8b|9b|12b|14b/i.test(m) ? c.dim(' [mid]')
+                           : role.tier === 'large'    && /32b|34b|70b|72b|30b/i.test(m) ? c.dim(' [heavy]')
+                           : '';
+          lines.push(`${prefix}${c.text(m)}${tag}${check}`);
+        }
+
+        lines.push('');
+        lines.push(`  ${c.dim('↑↓')} select  ${c.dim('↵')} assign  ${c.dim('esc')} skip  ${c.dim(`${this.models.length} models`)}`);
+
+        const output = lines.join('\n');
+        process.stdout.write(output + '\n');
+        linesRendered = lines.filter(l => l.includes('\n') || l.length > 0).length + 1;
+      };
+
+      process.stdout.write(ANSI.hideCursor);
+      render();
+
+      const onKeypress = (_str: string, key: any) => {
+        switch (key?.name) {
+          case 'up':
+            cursor = Math.max(0, cursor - 1);
+            if (cursor < scroll) scroll = cursor;
+            render();
+            break;
+          case 'down':
+            cursor = Math.min(this.models.length - 1, cursor + 1);
+            if (cursor >= scroll + maxVisible) scroll = cursor - maxVisible + 1;
+            render();
+            break;
+          case 'return':
+            cleanup();
+            resolve(this.models[cursor] || null);
+            break;
+          case 'escape':
+          case 'c':
+            if (key?.name === 'c' && !key?.ctrl) break;
+            cleanup();
+            resolve(null);
+            break;
+        }
+      };
+
+      const cleanup = () => {
+        process.stdin.removeListener('keypress', onKeypress);
+        process.stdout.write(ANSI.showCursor);
+        if (linesRendered > 0) {
+          process.stdout.write(`\x1B[${linesRendered}A\x1B[0J`);
+          linesRendered = 0;
+        }
+      };
+
+      process.stdin.setRawMode?.(true);
+      process.stdin.resume();
+      process.stdin.on('keypress', onKeypress);
+    });
+  }
+
+  // ── Smart suggestions ────────────────────────────────────────────────────────
+  /**
+   * Analyze installed models and suggest role assignments + upgrades.
+   * Returns a formatted string for display.
+   */
+  formatSuggestions(): string {
+    const lines: string[] = ['\n'];
+
+    if (!this.ollamaOnline) {
+      lines.push(`  ${c.error('●')} ${c.error.bold('Ollama is not running')}`);
+      lines.push('');
+      return lines.join('\n');
+    }
+
+    if (!this.models.length) {
+      lines.push(`  ${c.warning('●')} ${c.warning.bold('No models installed')}`);
+      lines.push('');
+      lines.push(this.renderDownloadGuide());
+      return lines.join('\n');
+    }
+
+    lines.push(`  ${c.accent.bold('Smart Suggestions')}\n`);
+
+    // Analyze installed models by size
+    const analyzed = this.models.map(m => {
+      const sizeMatch = m.match(/[:\-](\d+\.?\d*)b/i);
+      const sizeB     = sizeMatch ? parseFloat(sizeMatch[1]) : 0;
+      const isCoder   = /coder|codellama|code|deepseek/i.test(m);
+      const isChat    = /chat|instruct|general|gemma|yi/i.test(m);
+      return { name: m, sizeB, isCoder, isChat };
+    }).sort((a, b) => a.sizeB - b.sizeB);
+
+    // Suggest optimal role assignments
+    lines.push(`  ${c.dim('Optimal role assignment based on your models:')}\n`);
+
+    const suggestions: Array<{ role: typeof ModelSelector.ROLES[number]; model: string; reason: string }> = [];
+
+    // Scanner: smallest model
+    if (analyzed.length) {
+      suggestions.push({ role: ModelSelector.ROLES[0], model: analyzed[0].name, reason: `smallest (${analyzed[0].sizeB}B) — fast scanning` });
+    }
+
+    // Coder: largest coder model
+    const coders = analyzed.filter(m => m.isCoder);
+    if (coders.length) {
+      const best = coders[coders.length - 1];
+      suggestions.push({ role: ModelSelector.ROLES[3], model: best.name, reason: `strongest coder model (${best.sizeB}B)` });
+    }
+
+    // Planner: largest non-coder model
+    const planners = analyzed.filter(m => !m.isCoder && m.sizeB > 10);
+    if (planners.length) {
+      const best = planners[planners.length - 1];
+      suggestions.push({ role: ModelSelector.ROLES[4], model: best.name, reason: `large general model (${best.sizeB}B) — deep reasoning` });
+    } else if (analyzed.length > 1) {
+      suggestions.push({ role: ModelSelector.ROLES[4], model: analyzed[analyzed.length - 1].name, reason: `largest available — best for planning` });
+    }
+
+    // Executor: mid-size model that follows instructions
+    const executors = analyzed.filter(m => m.sizeB >= 7 && m.sizeB <= 34);
+    if (executors.length) {
+      suggestions.push({ role: ModelSelector.ROLES[5], model: executors[0].name, reason: `mid-range (${executors[0].sizeB}B) — reliable execution` });
+    }
+
+    // Chat: chat/instruct model
+    const chatters = analyzed.filter(m => m.isChat);
+    if (chatters.length) {
+      suggestions.push({ role: ModelSelector.ROLES[6], model: chatters[chatters.length - 1].name, reason: `instruction-tuned — natural conversation` });
+    }
+
+    // Architect: largest overall
+    if (analyzed.length > 2) {
+      suggestions.push({ role: ModelSelector.ROLES[2], model: analyzed[analyzed.length - 1].name, reason: `largest model (${analyzed[analyzed.length - 1].sizeB}B) — complex analysis` });
+    }
+
+    // Base: mid-range
+    if (analyzed.length > 3) {
+      const mid = analyzed[Math.floor(analyzed.length / 2)];
+      suggestions.push({ role: ModelSelector.ROLES[1], model: mid.name, reason: `balanced (${mid.sizeB}B) — general fallback` });
+    }
+
+    for (const s of suggestions) {
+      const current = this.getRoleValue(s.role);
+      const same    = current === s.model;
+      const check   = same ? c.success(' ✓') : '';
+      const cmd     = same ? '' : c.dim(` → /models ${s.role.tier} ${s.model}`);
+      lines.push(`  ${s.role.icon} ${s.role.color(s.role.label.padEnd(9))} ${c.text(s.model)}${check}`);
+      lines.push(`    ${c.dim(s.reason)}${cmd}`);
+    }
+
+    // Suggest downloads for empty roles
+    const emptyRoles = ModelSelector.ROLES.filter(r => !this.getRoleValue(r));
+    if (emptyRoles.length) {
+      lines.push('');
+      const emptyMsg = emptyRoles.length + ' role(s) still unassigned:';
+      lines.push(`  ${c.warning('⚠')} ${c.warning(emptyMsg)}`);
+      for (const r of emptyRoles) {
+        lines.push(`  ${r.icon} ${c.dim(r.label)} — ${c.muted(r.desc)}`);
+      }
+    }
+
+    // Suggest upgrades
+    const upgrades = this.getUpgradeSuggestions();
+    if (upgrades.length) {
+      lines.push('');
+      lines.push(`  ${c.info('↑')} ${c.info.bold('Upgrade suggestions')}`);
+      for (const u of upgrades.slice(0, 3)) {
+        lines.push(`  ${c.dim('•')} ${c.accent(`ollama pull ${u.name}`)}  ${c.muted(`${u.size_gb}GB · ${u.description}`)}`);
+        lines.push(`    ${c.dim(u.reason)}`);
+      }
+    }
+
+    lines.push('');
+    return lines.join('\n');
+  }
+
+  private getUpgradeSuggestions(): Array<ModelSpec & { reason: string }> {
+    const results: Array<ModelSpec & { reason: string }> = [];
+
+    // If no coder model or using a tiny one
+    if (!this.coderModel || this.coderModel === this.smallModel) {
+      const bestCoder = RECOMMENDED_MODELS.find(m => m.tier === 'medium' && m.strengths.includes('coding'));
+      if (bestCoder && !this.models.includes(bestCoder.name)) {
+        results.push({ ...bestCoder, reason: `Upgrade coder role — current is too small for reliable code generation` });
+      }
+    }
+
+    // If no planner or using same as coder
+    if (!this.plannerModel || this.plannerModel === this.coderModel) {
+      const bestPlanner = RECOMMENDED_MODELS.find(m => m.tier === 'large' && m.strengths.includes('planning'));
+      if (bestPlanner && !this.models.includes(bestPlanner.name)) {
+        results.push({ ...bestPlanner, reason: `Dedicated planner model — improves planning swarm quality` });
+      }
+    }
+
+    return results;
   }
 
   /** Find the best installed model for a tier based on the curated catalogue */
