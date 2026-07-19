@@ -1,10 +1,12 @@
 // ── Command Palette ───────────────────────────────────────────────────────────
-// Live dropdown that appears under the input as soon as you type “/”.
-// Filters commands as you type, supports subcommand completion, and is driven
-// by the LineEditor's below-region + intercept hooks:
+// Live dropdown that appears under the input as soon as you type “/” — or “@”
+// anywhere in the line for file mentions. Filters as you type, supports
+// subcommand completion, and is driven by the LineEditor's below-region +
+// intercept hooks:
 //
 //   ↑/↓   move selection          tab  complete into the input
 //   ↵     run selected command    esc  dismiss until the input changes
+//         (file items: ↵ completes instead of running)
 //
 // This is what makes the prompt feel like Claude Code / OpenCode.
 
@@ -20,7 +22,17 @@ export interface PaletteItem {
   desc:   string;
   /** Whether accepting with Tab should append a space (has subcommands). */
   hasArgs: boolean;
+  /** File mentions complete on ↵ instead of submitting. */
+  kind?: 'command' | 'file';
 }
+
+export interface PaletteOpts {
+  /** Repo-relative file matches for an @-mention query (fuzzy). */
+  files?: (query: string) => string[];
+}
+
+/** Trailing @-token: "fix auth in @src/cl" → mention = "src/cl". */
+const AT_TOKEN = /(^|\s)@([^\s@]*)$/;
 
 const MAX_VISIBLE = 6;
 
@@ -32,14 +44,23 @@ export class CommandPalette {
   private scrollTop = 0;
   private dismissedFor: string | null = null;
 
+  constructor(private opts: PaletteOpts = {}) {}
+
   /** Recompute items from the current input line. Call on every change. */
   update(line: string): void {
     const t = line.trimStart();
 
     if (this.dismissedFor !== null && t !== this.dismissedFor) this.dismissedFor = null;
-    if (!t.startsWith('/') || this.dismissedFor === t) { this.hide(); return; }
+    if (this.dismissedFor === t) { this.hide(); return; }
 
-    this.items = t.includes(' ') ? this.subcommandItems(t) : this.topLevelItems(t);
+    const at = this.opts.files ? AT_TOKEN.exec(line) : null;
+    if (at) {
+      this.items = this.fileItems(line, at);
+    } else if (t.startsWith('/')) {
+      this.items = t.includes(' ') ? this.subcommandItems(t) : this.topLevelItems(t);
+    } else {
+      this.hide(); return;
+    }
 
     if (!this.items.length) { this.hide(); return; }
     this.selected  = Math.min(this.selected, this.items.length - 1);
@@ -86,7 +107,8 @@ export class CommandPalette {
     if (width !== undefined) {
       const lines: string[] = [];
       const count = this.items.length;
-      lines.push('  ' + panelTop(width - 4, c.dim(`${count} command${count !== 1 ? 's' : ''}`)));
+      const noun  = this.items[0]?.kind === 'file' ? 'file' : 'command';
+      lines.push('  ' + panelTop(width - 4, c.dim(`${count} ${noun}${count !== 1 ? 's' : ''}`)));
       if (this.scrollTop > 0) lines.push('  ' + panelRow(c.dim(`↑ ${this.scrollTop} more`), width - 4));
       for (let i = this.scrollTop; i < end; i++) {
         const it  = this.items[i];
@@ -149,6 +171,18 @@ export class CommandPalette {
     }
     scored.sort((a, b) => a.score - b.score || a.item.label.localeCompare(b.item.label));
     return scored.map(s => s.item);
+  }
+
+  private fileItems(line: string, at: RegExpExecArray): PaletteItem[] {
+    const query  = at[2];
+    const prefix = line.slice(0, at.index) + at[1];   // text before the “@”
+    return (this.opts.files?.(query) ?? []).map(f => ({
+      insert:  `${prefix}@${f}`,
+      label:   f.length > 44 ? '…' + f.slice(-43) : f,
+      desc:    '',
+      hasArgs: true,      // completing a path appends a space to keep typing
+      kind:    'file' as const,
+    }));
   }
 
   private subcommandItems(t: string): PaletteItem[] {

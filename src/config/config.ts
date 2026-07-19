@@ -220,19 +220,19 @@ export function detectConcurrencySync(config: SophosConfig): ConcurrencyPlan {
   reasons.push(`${modelVramGB}GB model + ${Math.round(contextMB)}MB ctx = ${Math.round(perInstanceMB / 1024 * 10) / 10}GB/instance`);
   reasons.push(`${Math.round(availableMB / 1024)}GB available → ${maxByVRAM} fit (VRAM), ${maxByCPU} (CPU)`);
 
-  // User has explicitly set concurrent_requests (i.e. different from default) — respect it
+  // User has explicitly set concurrent_requests (auto_detect_concurrency = false) — respect it
   const userOverride = !config.ollama.auto_detect_concurrency
     ? config.ollama.concurrent_requests
     : null;
 
   let optimal: number;
   if (maxByVRAM === 0) {
-    // Model won't fit in VRAM — Ollama will offload layers to RAM.
-    // Calculate how many instances fit in available system RAM (leave 3GB for OS).
-    const ramGB       = specs.system_ram_mb / 1024;
-    const freeRamGB   = Math.max(0, ramGB - 3);
-    const maxByRAM    = Math.max(1, Math.floor(freeRamGB / modelVramGB));
-    const ramCap      = Math.min(maxByRAM, maxByCPU);
+    // Model won't fit in VRAM — Ollama offloads layers to system RAM.
+    // Calculate how many instances fit in available RAM (leave 3GB for OS).
+    const ramGB     = specs.system_ram_mb / 1024;
+    const freeRamGB = Math.max(0, ramGB - 3);
+    const maxByRAM  = Math.max(1, Math.floor(freeRamGB / modelVramGB));
+    const ramCap    = Math.min(maxByRAM, maxByCPU);
     optimal = userOverride ?? Math.min(ramCap, 4); // cap at 4 to avoid RAM thrashing
     reasons.push(`⚠ Model too large for VRAM — offloading to RAM (${Math.round(ramGB)}GB system, ${Math.round(freeRamGB)}GB free)`);
     reasons.push(`  ${maxByRAM} instances fit in RAM, ${maxByCPU} by CPU → using ${optimal}`);
