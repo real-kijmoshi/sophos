@@ -202,13 +202,22 @@ async function runMCPMode(opts: CLIOptions): Promise<void> {
 }
 
 async function runBatchMode(opts: CLIOptions): Promise<void> {
-  console.log(banner({ version: pkg.version }));
-  console.log(statusBar({ connected: true, model: opts.model || 'auto' }));
-  console.log(`\n  ${c.muted('Target:')}  ${c.accent(opts.targetDir)}`);
-  console.log(`  ${c.muted('Request:')} ${c.text(opts.request)}`);
-  console.log(`  ${c.muted('Plan:')}    ${opts.planMode ? c.warning('ON') : c.muted('OFF')}`);
-  console.log('');
-
+  // Import the batch formatter
+  const { BatchFormatter } = await import('./cli/batch-formatter.js');
+  
+  // Create formatter with options
+  const formatter = BatchFormatter.format({
+    targetDir: opts.targetDir,
+    request: opts.request,
+    planMode: opts.planMode,
+    dryRun: opts.dryRun,
+    verbose: opts.verbose,
+    model: opts.model,
+  });
+  
+  // Print header
+  formatter.printHeader();
+  
   const sophosConfig = loadConfig(opts.configPath || getDefaultConfigPath());
   const orchConfig: OrchestratorConfig = {
     target_dir:            opts.targetDir,
@@ -221,48 +230,64 @@ async function runBatchMode(opts: CLIOptions): Promise<void> {
 
   const abortCtrl = new AbortController();
   const onSigint = () => {
-    console.log(`\n  ${c.warning('⚡')} Interrupting pipeline…`);
     abortCtrl.abort();
   };
   process.on('SIGINT', onSigint);
 
   const orchestrator = new Orchestrator(orchConfig, sophosConfig);
 
-  // Pipe events to stdout in batch mode
-  orchestrator.on('phase:start', e => console.log(`\n  ${c.warning('▶')} ${e.phaseName}`));
-  orchestrator.on('phase:line',  e => console.log(`    ${c.muted(e.line)}`));
-  orchestrator.on('phase:done',  e => console.log(`  ${c.success('✓')} ${e.phaseName}  ${c.dim(`${e.durationMs}ms`)}`));
-  orchestrator.on('phase:fail',  e => console.log(`  ${c.error('✗')} ${e.phaseName}: ${e.error}`));
+  // Pipe events to formatter
+  orchestrator.on('phase:start', e => {
+    formatter.onPhaseEvent({
+      type: 'start',
+      phaseId: e.phaseId,
+      phaseName: e.phaseName,
+    });
+  });
+  
+  orchestrator.on('phase:line', e => {
+    formatter.onPhaseEvent({
+      type: 'line',
+      phaseId: e.phaseId,
+      phaseName: e.phaseName,
+      line: e.line,
+    });
+  });
+  
+  orchestrator.on('phase:done', e => {
+    formatter.onPhaseEvent({
+      type: 'done',
+      phaseId: e.phaseId,
+      phaseName: e.phaseName,
+      durationMs: e.durationMs,
+    });
+  });
+  
+  orchestrator.on('phase:fail', e => {
+    formatter.onPhaseEvent({
+      type: 'fail',
+      phaseId: e.phaseId,
+      phaseName: e.phaseName,
+      error: e.error?.message || String(e.error),
+    });
+  });
 
   let result;
   try {
     result = await orchestrator.execute(abortCtrl.signal);
   } catch (err: any) {
     if (err.name === 'AbortError') {
-      console.log(`\n  ${c.warning('⚡')} Pipeline cancelled. Partial results may have been written.\n`);
+      formatter.printCancellation();
       process.exit(130);
     }
-    console.error(`\n  ${c.error('Fatal:')} ${err.message}\n`);
+    formatter.printError(err, 'Pipeline execution');
     process.exit(1);
   } finally {
     process.off('SIGINT', onSigint);
   }
 
-  if (result.deliverables) {
-    const d = result.deliverables;
-    console.log('\n' + '═'.repeat(60));
-    console.log(`  ${result.success ? c.success('✓ COMPLETE') : c.error('✗ FAILED')}`);
-    console.log('═'.repeat(60));
-    console.log(`  ${d.executive_summary}`);
-    console.log(`  Created:  ${d.files_created.length}  Modified: ${d.files_modified.length}`);
-    console.log(`  Security: ${d.security_report.length} findings`);
-    if (d.llm_stats) {
-      console.log(`  LLM:      ${d.llm_stats.calls} calls, ${d.llm_stats.total_tokens} tokens`);
-    }
-    console.log('');
-  } else {
-    console.log(`\n  ${c.error('Pipeline failed.')} Check output above.\n`);
-  }
+  // Print result
+  formatter.printResult(result);
 
   process.exit(result.success ? 0 : 1);
 }
