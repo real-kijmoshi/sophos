@@ -10,6 +10,7 @@ import type { OrchestratorConfig } from '../types.js';
 import type { SophosConfig } from '../config/config.js';
 import { c } from '../cli/ui.js';
 import { getFrontendHTML } from './frontend.js';
+import { globalBus } from '../global-bus.js';
 
 export interface WebUIServerOptions {
   port:       number;
@@ -28,6 +29,7 @@ interface PipelineJob {
   startedAt: number;
   events:    PipelineEvent[];
   result?:   any;
+  orch?:     Orchestrator;
 }
 
 interface PipelineEvent {
@@ -96,6 +98,63 @@ export class WebUIServer {
     console.log(`\n  ${c.success('✓')} ${c.accent.bold('Sophos WebUI')}  ${c.text(url)}`);
     console.log(`  ${c.dim('pipeline events stream via WebSocket at /ws')}`);
     console.log(`  ${c.dim('press Ctrl+C to stop')}\n`);
+
+    // Subscribe to the global bus so TUI/batch pipelines are also visible in the WebUI
+    this.subscribeToGlobalBus();
+  }
+
+  // ── Global bus bridge ────────────────────────────────────────────────────────
+  // Forwards events from ANY orchestrator (TUI, batch, MCP) to WebSocket clients.
+  // Jobs started externally are registered on-demand with source='tui'/'batch'/etc.
+
+  private subscribeToGlobalBus(): void {
+    globalBus.on('job:started', (data: { jobId: string; request: string; source: string }) => {
+      // Only track if not already known (webui-spawned jobs are already in this.jobs)
+      if (!this.jobs.has(data.jobId)) {
+        const job: PipelineJob = {
+          id:        data.jobId,
+          request:   data.request,
+          targetDir: this.opts.targetDir,
+          planOnly:  false,
+          status:    'running',
+          startedAt: Date.now(),
+          events:    [],
+        };
+        this.jobs.set(job.id, job);
+        this.broadcast({ type: 'job:queued',  job: { id: job.id, request: job.request } });
+        this.broadcast({ type: 'job:started', jobId: job.id, source: data.source });
+      }
+    });
+
+    globalBus.on('pipeline:event', (data: { jobId: string; event: any }) => {
+      const job = this.jobs.get(data.jobId);
+      if (!job) return;
+      job.events.push({ type: data.event.type, timestamp: data.event.timestamp, data: data.event });
+      this.broadcast({ type: 'pipeline:event', jobId: data.jobId, event: data.event });
+    });
+
+    globalBus.on('llm:token', (data: { jobId: string; chunk: string; agentName: string }) => {
+      // Only broadcast if this job is known (it should be by now)
+      if (!this.jobs.has(data.jobId)) return;
+      this.broadcast({ type: 'llm:token', jobId: data.jobId, chunk: data.chunk, agentName: data.agentName });
+    });
+
+    globalBus.on('job:done', (data: { jobId: string; success: boolean; summary?: string }) => {
+      const job = this.jobs.get(data.jobId);
+      if (!job) return;
+      job.status = data.success ? 'done' : 'failed';
+      this.broadcast({
+        type:    data.success ? 'job:completed' : 'job:failed',
+        jobId:   data.jobId,
+        success: data.success,
+        summary: data.summary,
+        error:   data.success ? undefined : 'Pipeline failed',
+      });
+    });
+
+    globalBus.on('steering:ack', (data: { jobId: string; note: string }) => {
+      this.broadcast({ type: 'steering:ack', jobId: data.jobId, note: data.note });
+    });
   }
 
   // ── API handlers ─────────────────────────────────────────────────────────────
@@ -196,28 +255,20 @@ export class WebUIServer {
       dry_run:               this.opts.dryRun  || job.planOnly,
     };
 
-    const orch = new Orchestrator(orchConfig, this.config);
-
-    // Forward all orchestrator events to WebSocket clients
-    const eventTypes = ['phase:start', 'phase:line', 'phase:done', 'phase:fail', 'task:update', 'pipeline:done'];
-    for (const evt of eventTypes) {
-      orch.on(evt, (data: any) => {
-        const event: PipelineEvent = { type: evt, timestamp: Date.now(), data };
-        job.events.push(event);
-        this.broadcast({ type: 'pipeline:event', jobId: job.id, event: { type: evt, ...data } });
-      });
+    const orch = new Orchestrator(orchConfig, this.config, 'webui');
+    // Re-key the job under the orchestrator's canonical jobId
+    if (job.id !== orch.jobId) {
+      this.jobs.delete(job.id);
+      job.id = orch.jobId;
+      this.jobs.set(job.id, job);
     }
+    job.orch = orch;
 
+    // All events flow through globalBus → subscribeToGlobalBus() handles broadcasting.
+    // We just need to run the pipeline and handle the final result.
     const result = await orch.execute();
     job.status = result.success ? 'done' : 'failed';
     job.result = result.deliverables;
-
-    this.broadcast({
-      type:    'job:completed',
-      jobId:   job.id,
-      success: result.success,
-      summary: result.deliverables?.executive_summary,
-    });
   }
 
   // ── WebSocket broadcast ──────────────────────────────────────────────────────
@@ -242,6 +293,24 @@ export class WebUIServer {
           body:    JSON.stringify(msg),
         })).then(r => r.json()).then(data => ws.send(JSON.stringify(data)));
         break;
+      case 'steering': {
+        // Inject a steering note into a running pipeline
+        const job = this.jobs.get(msg.jobId);
+        if (job?.orch && job.status === 'running') {
+          job.orch.addSteering(msg.note);
+        }
+        break;
+      }
+      case 'cancel': {
+        // Abort a running pipeline — the orchestrator respects the AbortSignal
+        // passed to execute(); for now just mark the job as failed
+        const job = this.jobs.get(msg.jobId);
+        if (job && job.status === 'running') {
+          job.status = 'failed';
+          this.broadcast({ type: 'job:failed', jobId: job.id, error: 'Cancelled by user' });
+        }
+        break;
+      }
     }
   }
 }

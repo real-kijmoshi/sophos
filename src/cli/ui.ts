@@ -903,13 +903,17 @@ export function helpPanel(): string {
   div('or use explicit commands');
 
   sec('MODEL COMMANDS');
-  row('/models',               'status + tier table');
-  row('/models suggest',       'download recommendations');
-  row('/models set <name>',    'set medium tier model');
-  row('/models small <name>',  'set small tier model');
-  row('/models large <name>',  'set large tier model');
-  row('/models save local',    'save to .sophos.json');
-  row('/models save global',   'save to ~/.config/sophos/config.json');
+  row('/models',                   'role assignment table');
+  row('/models assign',            'interactive arrow-key picker');
+  row('/models suggest',           'smart upgrade suggestions');
+  row('/models coder <name>',      'set coder model');
+  row('/models planner <name>',    'set planner model');
+  row('/models executor <name>',   'set executor model');
+  row('/models chat <name>',       'set chat model');
+  row('/models scanner <name>',    'set scanner (analysis) model');
+  row('/models architect <name>',  'set architect (planning) model');
+  row('/models save local',        'save to .sophos.json');
+  row('/models save global',       'save to ~/.config/sophos/config.json');
 
   div('git');
 

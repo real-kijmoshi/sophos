@@ -1,6 +1,7 @@
 import * as fs   from 'node:fs';
 import * as path from 'node:path';
 import * as os   from 'node:os';
+import { detectHardware, lookupModelVRAM, type ConcurrencyPlan } from '../utils/hardware-detector.js';
 
 export interface SophosConfig {
   ollama: {
@@ -18,6 +19,7 @@ export interface SophosConfig {
     timeout_ms:          number;
     max_retries:         number;
     concurrent_requests: number;
+    auto_detect_concurrency: boolean;   // auto-tune based on hardware
   };
   pipeline: {
     max_review_iterations: number;
@@ -62,6 +64,7 @@ export const DEFAULT_CONFIG: SophosConfig = {
     timeout_ms:          300000,
     max_retries:         3,
     concurrent_requests: 4,
+    auto_detect_concurrency: true,
   },
   pipeline: {
     max_review_iterations: 3,
@@ -152,7 +155,89 @@ export function loadConfig(localConfigPath?: string): SophosConfig {
   // 5. Env
   mergeConfig(config, loadFromEnv());
 
+  // 6. Auto-detect concurrent requests based on hardware (sync, fast)
+  if (config.ollama.auto_detect_concurrency) {
+    const plan = detectConcurrencySync(config);
+    config.ollama.concurrent_requests = plan.concurrent_requests;
+    (config as any)._concurrency_plan = plan;
+  }
+
   return config;
+}
+
+// ── Auto-detect concurrency ──────────────────────────────────────────────────
+
+/**
+ * Synchronous concurrency detection (no Ollama API call).
+ * Used at config load time. Fast — just runs nvidia-smi.
+ */
+export function detectConcurrencySync(config: SophosConfig): ConcurrencyPlan {
+  const specs   = detectHardware();
+  const reasons: string[] = [];
+
+  const modelName    = config.ollama.model_planner || config.ollama.model_large || config.ollama.model_medium || config.ollama.model_coder || '';
+  const modelVramGB  = modelName ? lookupModelVRAM(modelName) : null;
+  const paramMatch   = modelName.match(/[:\-](\d+\.?\d*)b/i);
+  const paramCount   = paramMatch ? parseFloat(paramMatch[1]) : null;
+
+  if (!specs.gpu) {
+    const ramGB      = specs.system_ram_mb / 1024;
+    const perModelGB = (modelVramGB || 4);
+    const ramMax     = Math.floor((ramGB - 2) / perModelGB);
+    const coreMax    = Math.max(1, Math.floor(specs.cpu_cores / 2));
+    const optimal    = Math.min(ramMax, coreMax, 6);
+    reasons.push(`CPU mode: ${specs.cpu_cores} cores, ${Math.round(ramGB)}GB RAM`);
+    if (modelName) reasons.push(`Model: ${modelName} (~${modelVramGB || '?'}GB)`);
+    return { concurrent_requests: Math.max(1, optimal), vram_budget_mb: 0, model_vram_gb: modelVramGB, loaded_models: [], reasons };
+  }
+
+  const gpu = specs.gpu;
+  reasons.push(`${gpu.name}: ${Math.round(gpu.vram_total_mb / 1024)}GB total, ${Math.round(gpu.vram_free_mb / 1024)}GB free`);
+
+  if (!modelVramGB) {
+    const freeGB = gpu.vram_free_mb / 1024;
+    let optimal: number;
+    if (freeGB >= 40)      optimal = 8;
+    else if (freeGB >= 20) optimal = 6;
+    else if (freeGB >= 10) optimal = 4;
+    else if (freeGB >= 6)  optimal = 3;
+    else                   optimal = 2;
+    optimal = Math.min(optimal, specs.cpu_cores, 8);
+    reasons.push(`Unknown model — ${Math.round(freeGB)}GB free → ${Math.max(1, optimal)} instances`);
+    return { concurrent_requests: Math.max(1, optimal), vram_budget_mb: gpu.vram_free_mb, model_vram_gb: null, loaded_models: [], reasons };
+  }
+
+  const modelVramMB   = modelVramGB * 1024;
+  // Estimate context overhead: ~0.5MB per 1K tokens for 7B, scales up
+  const mbPerKTokens  = paramCount ? Math.max(0.2, paramCount * 0.08) : 1.0;
+  const contextMB     = (config.ollama.num_ctx / 1024) * mbPerKTokens;
+  const perInstanceMB = modelVramMB + contextMB;
+  const overheadMB    = 1536;
+  const availableMB   = gpu.vram_free_mb - overheadMB;
+  const maxByVRAM     = Math.max(0, Math.floor(availableMB / perInstanceMB));
+  const maxByCPU      = Math.max(1, Math.floor(specs.cpu_cores / 2));
+  const optimal       = Math.min(maxByVRAM, maxByCPU, 8);
+
+  reasons.push(`${modelVramGB}GB model + ${Math.round(contextMB)}MB ctx = ${Math.round(perInstanceMB / 1024 * 10) / 10}GB/instance`);
+  reasons.push(`${Math.round(availableMB / 1024)}GB available → ${maxByVRAM} fit (VRAM), ${maxByCPU} (CPU)`);
+
+  if (optimal <= 0) reasons.push(`⚠ Model too large — reduce num_ctx or use smaller model`);
+  else if (optimal < 3) reasons.push(`💡 Close GPU apps or reduce num_ctx to increase concurrency`);
+
+  return { concurrent_requests: Math.max(1, optimal), vram_budget_mb: perInstanceMB, model_vram_gb: modelVramGB, loaded_models: [], reasons };
+}
+
+/**
+ * Async version — also queries Ollama for currently loaded models.
+ * Use in /hw command or pipeline start for accurate diagnostics.
+ */
+export async function detectConcurrencyFull(config: SophosConfig): Promise<ConcurrencyPlan> {
+  const { calculateConcurrency } = await import('../utils/hardware-detector.js');
+  try {
+    return await calculateConcurrency(config.ollama as any);
+  } catch {
+    return detectConcurrencySync(config);
+  }
 }
 
 // ── Save ──────────────────────────────────────────────────────────────────────

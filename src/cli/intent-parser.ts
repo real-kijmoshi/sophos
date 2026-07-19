@@ -23,7 +23,7 @@ export interface ParsedIntent {
 // ── Autocomplete tree ─────────────────────────────────────────────────────────
 // Maps every slash command to its valid subcommands/args for Tab completion.
 export const COMMAND_COMPLETIONS: Record<string, string[]> = {
-  '/models':       ['set', 'small', 'large', 'suggest', 'save', 'list', 'wizard', 'install', 'offline'],
+  '/models':       ['assign', 'coder', 'planner', 'executor', 'chat', 'scanner', 'architect', 'base', 'small', 'large', 'set', 'suggest', 'save', 'list', 'wizard', 'install', 'offline'],
   '/models save':  ['local', 'global'],
   '/git':          ['status', 'log', 'diff', 'commit', 'branch', 'stash'],
   '/git stash':    ['pop'],
@@ -33,7 +33,7 @@ export const COMMAND_COMPLETIONS: Record<string, string[]> = {
   '/todo':         ['add', 'list', 'done', 'clear'],
   '/help':         [
     'models', 'git', 'diff', 'plan', 'security', 'cost',
-    'rollback', 'config', 'compact', 'clear', 'exit', 'status',
+    'rollback', 'config', 'compact', 'clear', 'exit', 'status', 'hw',
   ],
   '/notifications': ['clear'],
   '/config':        ['init'],
@@ -68,6 +68,7 @@ export const ALL_COMMANDS: Array<{ name: string; desc: string; aliases?: string[
   { name: '/webui',         desc: 'start WebUI server' },
   { name: '/mcp',           desc: 'start MCP server' },
   { name: '/tunnel',        desc: 'expose port via tunnel' },
+  { name: '/hw',            desc: 'hardware diagnostics',                aliases: ['/hardware', '/gpu'] },
   { name: '/help',          desc: 'show commands',                     aliases: ['/h', '/?'] },
   { name: '/exit',          desc: 'quit',                              aliases: ['/quit', '/q'] },
 ];

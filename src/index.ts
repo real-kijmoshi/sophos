@@ -136,6 +136,21 @@ async function main(): Promise<void> {
 }
 
 async function runInteractiveMode(opts: CLIOptions): Promise<void> {
+  // If a WebUI port was explicitly requested alongside TUI, start the server
+  // in the background — same process, same globalBus, so all pipeline events
+  // are visible in the browser in real time.
+  if (opts.webuiPort) {
+    const { WebUIServer } = await import('./webui/server.js');
+    const srv = new WebUIServer({
+      port:      opts.webuiPort,
+      host:      '0.0.0.0',
+      targetDir: opts.targetDir,
+      verbose:   opts.verbose,
+      dryRun:    opts.dryRun,
+    });
+    await srv.start();
+  }
+
   // Real terminal → full-screen TUI. Pipes / CI → line-based REPL fallback.
   if (process.stdin.isTTY && process.stdout.isTTY) {
     const { TuiApp } = await import('./cli/tui/app.js');

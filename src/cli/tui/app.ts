@@ -718,10 +718,10 @@ export class TuiApp {
   }
 
   private handleEscape(): boolean {
-    if (this.editor.getLine().length > 0) return false; // editor clears the line
     const s = this.active;
-    if (s.transcript.scrollOffset > 0) { s.transcript.toBottom(); this.dirty = true; return true; }
     if (s.running) { s.abortCtrl?.abort(); return true; }
+    if (this.editor.getLine().length > 0) return false; // editor clears the line
+    if (s.transcript.scrollOffset > 0) { s.transcript.toBottom(); this.dirty = true; return true; }
     return false;
   }
 

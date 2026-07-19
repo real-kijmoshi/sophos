@@ -10,6 +10,8 @@ import type { ModelSelector }   from './model-selector.js';
 import type { GitIntegration }  from './git-integration.js';
 import type { PermissionSystem }from './permissions.js';
 import { loadPipelineState, clearPipelineState, formatPipelineState } from './pipeline-state.js';
+import { detectConcurrencyFull } from '../config/config.js';
+import { detectHardware, formatGPU } from '../utils/hardware-detector.js';
 
 export interface CommandContext {
   session:         SessionManager;
@@ -85,9 +87,9 @@ export function getSlashCommands(): SlashCommand[] {
       },
     },
 
-    // ── /models (v3.0) ───────────────────────────────────────────────────────
+    // ── /models (v4.0) ───────────────────────────────────────────────────────
     {
-      name: 'models', aliases: ['model', 'm'], description: 'View or change AI models', usage: '/models [set|small|large|suggest|save|wizard]',
+      name: 'models', aliases: ['model', 'm'], description: 'View or change AI models', usage: '/models [assign|coder|planner|executor|chat|scanner|architect|suggest|save|wizard]',
       execute: async (args, ctx) => {
         const sub = args[0];
 
@@ -97,6 +99,36 @@ export function getSlashCommands(): SlashCommand[] {
           return;
         }
 
+        // Role aliases → canonical setter
+        const roleMap: Record<string, (name: string) => void> = {
+          'scanner':   (n) => ctx.modelSelector.setSmallModel(n),
+          'base':      (n) => ctx.modelSelector.setCurrentModel(n),
+          'architect': (n) => ctx.modelSelector.setLargeModel(n),
+          'coder':     (n) => ctx.modelSelector.setCoderModel(n),
+          'planner':   (n) => ctx.modelSelector.setPlannerModel(n),
+          'executor':  (n) => ctx.modelSelector.setExecutorModel(n),
+          'chat':      (n) => ctx.modelSelector.setChatModel(n),
+          // Legacy tier aliases
+          'small':     (n) => ctx.modelSelector.setSmallModel(n),
+          'set':       (n) => ctx.modelSelector.setCurrentModel(n),
+          'medium':    (n) => ctx.modelSelector.setCurrentModel(n),
+          'large':     (n) => ctx.modelSelector.setLargeModel(n),
+        };
+
+        const roleLabels: Record<string, string> = {
+          'scanner':   'Scanner (analysis)',
+          'base':      'Base (medium)',
+          'architect': 'Architect (planning)',
+          'coder':     'Coder',
+          'planner':   'Planner',
+          'executor':  'Executor',
+          'chat':      'Chat',
+          'small':     'Scanner (analysis)',
+          'set':       'Base (medium)',
+          'medium':    'Base (medium)',
+          'large':     'Architect (planning)',
+        };
+
         switch (sub) {
 
           // /models list — explicit model list
@@ -104,36 +136,42 @@ export function getSlashCommands(): SlashCommand[] {
             console.log(ctx.modelSelector.formatModelList());
             break;
 
-          // /models set <name> — set medium model
-          case 'set':
-            if (!args[1]) { console.log(`\n  ${c.error('Usage:')} /models set <model-name>\n`); return; }
-            ctx.modelSelector.setCurrentModel(args[1]);
-            console.log(`\n  ${c.success('✓')} Medium model: ${c.accent(args[1])}\n`);
+          // /models assign — interactive arrow-key TUI
+          case 'assign':
+          case 'pick':
+          case 'interactive':
+            await ctx.modelSelector.runInteractiveAssign();
             break;
 
-          // /models small <name>
-          case 'small':
-            if (!args[1]) { console.log(`\n  ${c.error('Usage:')} /models small <model-name>\n`); return; }
-            ctx.modelSelector.setSmallModel(args[1]);
-            console.log(`\n  ${c.success('✓')} Small model: ${c.accent(args[1])}\n`);
-            break;
-
-          // /models large <name>
-          case 'large':
-            if (!args[1]) { console.log(`\n  ${c.error('Usage:')} /models large <model-name>\n`); return; }
-            ctx.modelSelector.setLargeModel(args[1]);
-            console.log(`\n  ${c.success('✓')} Large model: ${c.accent(args[1])}\n`);
-            break;
-
-          // /models suggest — show download recommendations
+          // /models suggest — smart upgrade suggestions
           case 'suggest':
-          case 'download':
-          case 'setup':
-            ctx.modelSelector.printDownloadGuide();
+          case 'recommend':
+            console.log(ctx.modelSelector.formatSuggestions());
             break;
+
+          // /models <role> <name> — set model for a specific role
+          case 'coder':
+          case 'planner':
+          case 'executor':
+          case 'chat':
+          case 'scanner':
+          case 'architect':
+          case 'base':
+          case 'small':
+          case 'large':
+          case 'set': {
+            if (!args[1]) { console.log(`\n  ${c.error('Usage:')} /models ${sub} <model-name>\n`); return; }
+            const setter = roleMap[sub];
+            if (setter) {
+              setter(args[1]);
+              console.log(`\n  ${c.success('✓')} ${roleLabels[sub]}: ${c.accent(args[1])}\n`);
+            }
+            break;
+          }
 
           // /models wizard — interactive setup
           case 'wizard':
+          case 'setup':
             await ctx.modelSelector.runSetupWizard('local');
             break;
 
@@ -157,10 +195,10 @@ export function getSlashCommands(): SlashCommand[] {
             ctx.modelSelector.printOllamaOffline();
             break;
 
-          // /models <name> — shorthand for set
+          // /models <name> — shorthand for base/medium model
           default:
             ctx.modelSelector.setCurrentModel(sub);
-            console.log(`\n  ${c.success('✓')} Medium model: ${c.accent(sub)}\n`);
+            console.log(`\n  ${c.success('✓')} Base model: ${c.accent(sub)}\n`);
             break;
         }
       },
@@ -686,6 +724,60 @@ export function getSlashCommands(): SlashCommand[] {
           console.log('');
         }
 
+        console.log(ui.sectionFooter());
+      },
+    },
+
+    // ── /hw ──────────────────────────────────────────────────────────────────
+    {
+      name: 'hw', aliases: ['hardware', 'gpu'], description: 'Show hardware diagnostics and concurrency plan', usage: '/hw',
+      execute: async (_args, ctx) => {
+        const { loadConfig } = await import('../config/config.js');
+        const config = loadConfig();
+
+        console.log(ui.sectionHeader('Hardware Diagnostics'));
+
+        // System info
+        const specs = detectHardware();
+        console.log(`  ${c.accent.bold('System')}`);
+        console.log(`  ${c.muted('CPU:    ')} ${specs.cpu_cores} cores`);
+        console.log(`  ${c.muted('RAM:    ')} ${Math.round(specs.system_ram_mb / 1024)}GB`);
+        console.log(`  ${c.muted('GPU:    ')} ${formatGPU(specs.gpu)}`);
+        console.log('');
+
+        // Concurrency plan (async — queries Ollama for loaded models)
+        const plan = await detectConcurrencyFull(config);
+        console.log(`  ${c.accent.bold('Concurrency Plan')}`);
+        console.log(`  ${c.muted('Setting:')} ${c.text(String(plan.concurrent_requests))} simultaneous agents`);
+        console.log(`  ${c.muted('Model:  ')} ${c.text(config.ollama.model_planner || config.ollama.model_large || config.ollama.model_medium || '(none)')}`);
+        console.log(`  ${c.muted('Context:')} ${c.text(String(config.ollama.num_ctx))} tokens`);
+        if (plan.model_vram_gb) {
+          console.log(`  ${c.muted('VRAM:   ')} ${c.text(plan.model_vram_gb + 'GB')} per model`);
+        }
+        console.log('');
+
+        // Detailed reasoning
+        console.log(`  ${c.accent.bold('Reasoning')}`);
+        for (const r of plan.reasons) {
+          console.log(`  ${c.dim(r)}`);
+        }
+        console.log('');
+
+        // Loaded models
+        if (plan.loaded_models.length) {
+          console.log(`  ${c.accent.bold('Loaded Models in Ollama')}`);
+          for (const m of plan.loaded_models) {
+            console.log(`  ${c.dim('•')} ${c.text(m.name)} — ${c.warning(Math.round(m.vram_mb / 1024) + 'GB VRAM')}`);
+          }
+          console.log('');
+        }
+
+        // Config tip
+        if (config.ollama.auto_detect_concurrency) {
+          console.log(`  ${c.dim('Auto-detect:')} ${c.success('ON')} ${c.dim('(disable with auto_detect_concurrency: false)')}`);
+        } else {
+          console.log(`  ${c.dim('Auto-detect:')} ${c.muted('OFF')} ${c.dim('(set concurrent_requests manually)')}`);
+        }
         console.log(ui.sectionFooter());
       },
     },

@@ -3,6 +3,7 @@ import { PROMPTS } from '../llm/prompts.js';
 import type { ContextPackage, ImplementationSpecification, TaskDefinition } from '../types.js';
 import type { SophosConfig } from '../config/config.js';
 import { readFileContent } from '../utils/file-scanner.js';
+import { detectHardware, formatGPU } from '../utils/hardware-detector.js';
 
 interface PlannerResult {
   planner: string;
@@ -22,7 +23,17 @@ export async function executePlanningSwarm(
     .map(f => `  ${f.path} — ${f.reason} (confidence: ${f.confidence})`)
     .join('\n');
 
-  console.log('  Spawning 8 parallel planning agents...');
+  console.log('  Spawning 8 planning agents...');
+
+  // Show hardware + concurrency plan
+  const plan = (config as any)._concurrency_plan;
+  if (plan) {
+    const specs = detectHardware();
+    console.log(`  GPU: ${formatGPU(specs.gpu)}`);
+    for (const r of plan.reasons) console.log(`  ${r}`);
+  } else {
+    console.log(`  Concurrency: ${config.ollama.concurrent_requests}`);
+  }
 
   const planners: [string, () => Promise<PlannerResult>][] = [
     ['Architecture', async () => ({
@@ -85,16 +96,25 @@ export async function executePlanningSwarm(
 
   const batchSize = config.ollama.concurrent_requests;
   const results: PlannerResult[] = [];
+  const batchStartMs = Date.now();
 
   for (let i = 0; i < planners.length; i += batchSize) {
     const batch = planners.slice(i, i + batchSize);
-    console.log(`  Running planners ${i + 1}-${Math.min(i + batchSize, planners.length)} of ${planners.length}...`);
-    const batchResults = await Promise.all(batch.map(([, fn]) => fn()));
-    results.push(...batchResults);
-  }
+    const batchNum = Math.floor(i / batchSize) + 1;
+    const totalBatches = Math.ceil(planners.length / batchSize);
+    console.log(`  Batch ${batchNum}/${totalBatches}: Running ${batch.map(([name]) => name).join(', ')}...`);
 
-  for (const r of results) {
-    console.log(`    ${r.planner}: completed`);
+    const batchResults = await Promise.all(batch.map(async ([name, fn]) => {
+      const agentStartMs = Date.now();
+      const result = await fn();
+      const elapsed = ((Date.now() - agentStartMs) / 1000).toFixed(1);
+      console.log(`    ✓ ${name} completed (${elapsed}s)`);
+      return result;
+    }));
+
+    results.push(...batchResults);
+    const batchElapsed = ((Date.now() - batchStartMs) / 1000).toFixed(1);
+    console.log(`  Batch ${batchNum} done (${batchElapsed}s elapsed total)`);
   }
 
   console.log('  Merging planner proposals via Synthesizer...');
