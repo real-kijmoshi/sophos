@@ -192,7 +192,10 @@ export class LineEditor {
         case 'k':
           this.line = this.line.slice(0, this.cursor);
           this.changed(); return;
-        case 'w': this.deleteWordBack(); return;
+        case 'w':
+          // Empty line: offer the key to the host first (TUI: close session).
+          if (this.line.length === 0 && this.opts.onCtrlKey?.('w')) { this.render(); return; }
+          this.deleteWordBack(); return;
         case 'l':
           if (this.opts.managed) { this.opts.onCtrlKey?.('l'); this.render(); return; }
           process.stdout.write('\x1Bc');
