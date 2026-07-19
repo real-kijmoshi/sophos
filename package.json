@@ -1,0 +1,28 @@
+{
+  "name": "sophos",
+  "version": "1.0.0",
+  "description": "Multi-Agent Local Coding System — Production-Grade Orchestrator with Ollama",
+  "type": "module",
+  "main": "src/index.ts",
+  "bin": {
+    "sophos": "src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun src/index.ts",
+    "start": "bun src/index.ts",
+    "build": "bun build src/index.ts --outfile dist/sophos.js --target bun --banner '#!/usr/bin/env bun'",
+    "typecheck": "tsc --noEmit",
+    "test": "bun src/index.ts --help",
+    "webui": "bun src/index.ts --webui",
+    "mcp": "bun src/index.ts --mcp",
+    "tunnel": "bun src/index.ts --webui --tunnel"
+  },
+  "dependencies": {
+    "chalk": "^5.6.2",
+    "simple-git": "^3.27.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.6.0"
+  }
+}
