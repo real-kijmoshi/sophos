@@ -944,16 +944,21 @@ export function helpPanel(version?: string): string {
   div('keyboard shortcuts');
 
   sec('SHORTCUTS');
-  row('/',        'open command menu (↑↓ select · ↵ run · tab complete)');
-  row('Esc',      'interrupt pipeline · dismiss menu · clear input');
-  row('Ctrl+C',   'clear input — press twice to quit');
-  row('Ctrl+D',   'diff of last pipeline');
-  row('Ctrl+N',   'notification tray');
-  row('Ctrl+L',   'clear screen');
-  row('↑ / ↓',    'history (or menu selection when open)');
-  row('ship it',  'after pipeline — commit + push');
-  row('diff',     'after pipeline — review changes');
-  row('abort',    'after pipeline — discard');
+  row('/',          'open command menu (↑↓ select · ↵ run · tab complete)');
+  row('@',          'mention a file — fuzzy path completion');
+  row('Esc',        'interrupt pipeline · dismiss menu · clear input');
+  row('Ctrl+C',     'clear input — press twice to quit');
+  row('Ctrl+T',     'new session tab');
+  row('Ctrl+W',     'close session tab (when input is empty)');
+  row('Tab',        'switch session (when input is empty)');
+  row('Ctrl+D',     'diff of last pipeline');
+  row('Ctrl+N',     'notification tray');
+  row('Ctrl+L',     'clear screen');
+  row('PgUp/PgDn',  'scroll transcript (shift+↑/↓ by line)');
+  row('↑ / ↓',      'history — persists across restarts');
+  row('ship it',    'after pipeline — commit + push');
+  row('diff',       'after pipeline — review changes');
+  row('abort',      'after pipeline — discard');
 
   lines.push('');
   hr();

@@ -10,8 +10,9 @@
 //   │ footer — contextual key hints                               │
 //   └─────────────────────────────────────────────────────────────┘
 //
-// Sessions: ctrl+t new · tab / ctrl+←→ cycle · alt+1-9 jump. Each session has
-// its own transcript, chat history, and (possibly running) pipeline.
+// Sessions: ctrl+t new · ctrl+w close · tab / ctrl+←→ cycle · alt+1-9 jump.
+// Each session has its own transcript, chat history, and (possibly running)
+// pipeline; tabs show ◐ while running and ✓/✗ when a background run finishes.
 // Typing while a pipeline runs queues a steering note that is injected into
 // the orchestrator so phases that haven't started yet honor it.
 
@@ -42,7 +43,9 @@ import { loadConfig }       from '../../config/config.js';
 import { ProjectStore }     from '../../config/project-store.js';
 import { InteractiveDiffViewer } from '../diff-viewer.js';
 import { FileBrowser, FilePicker } from '../file-browser.js';
-import { savePipelineState, setProjectStore } from '../pipeline-state.js';
+import { savePipelineState, loadPipelineState, setProjectStore } from '../pipeline-state.js';
+import { HistoryStore } from '../history-store.js';
+import { FileIndex }    from '../file-index.js';
 import type { OrchestratorConfig } from '../../types.js';
 
 const CTRL_C_WINDOW_MS = 2000;
@@ -97,6 +100,8 @@ interface TuiSession {
   // post-run
   lastSuccess:      boolean;
   lastDeliverables: any;
+  /** Pipeline finished while another session was active — badge until visited. */
+  unread: false | 'ok' | 'fail';
 }
 
 export interface TuiConfig {
@@ -108,8 +113,11 @@ export interface TuiConfig {
 
 export class TuiApp {
   private screen  = new Screen();
-  private palette = new CommandPalette();
+  private palette = new CommandPalette({ files: q => this.fileIndex.match(q) });
   private editor!: LineEditor;
+  private fileIndex!:    FileIndex;
+  private historyStore!: HistoryStore;
+  private lastPipeline: ReturnType<typeof loadPipelineState> = null;
 
   private sessions:  TuiSession[] = [];
   private activeIdx = 0;
@@ -178,6 +186,10 @@ export class TuiApp {
     this.projectStore  = new ProjectStore(cfg.projectDir);
     this.projectStore.init();
     setProjectStore(this.projectStore);
+    this.fileIndex     = new FileIndex(cfg.projectDir);
+    this.historyStore  = new HistoryStore(cfg.projectDir);
+    // Editor keeps a live reference to this array — persisted after each submit.
+    this.history       = this.historyStore.load();
   }
 
   private get active(): TuiSession { return this.sessions[this.activeIdx]; }
@@ -197,7 +209,7 @@ export class TuiApp {
       prompt:    () => this.makePrompt(),
       onSubmit:  line => { this.handleSubmit(line).catch(() => {}); },
       intercept: (str, key) => this.interceptKey(str, key),
-      onChange:  line => this.palette.update(line),
+      onChange:  line => this.onInputChange(line),
       onCtrlC:   () => this.handleCtrlC(),
       onCtrlKey: name => this.handleCtrlKey(name),
       onEscape:  () => this.handleEscape(),
@@ -276,7 +288,22 @@ export class TuiApp {
     this.dirty = true;
   }
 
+  /** Palette follows the input; an @-mention lazily builds the file index. */
+  private onInputChange(line: string): void {
+    this.palette.update(line);
+    if (/@[^\s@]*$/.test(line)) {
+      this.fileIndex.refresh().then(() => {
+        if (this.editor.getLine() === line) {
+          this.palette.update(line);
+          this.dirty = true;
+          this.renderFrame();
+        }
+      }).catch(() => {});
+    }
+  }
+
   private async backgroundInit(): Promise<void> {
+    this.lastPipeline = loadPipelineState();
     const [gitInfo] = await Promise.all([
       this.git.getInfo().catch(() => null),
       this.modelSelector.discover().catch(() => {}),
@@ -344,6 +371,7 @@ export class TuiApp {
       orch:          null,
       lastSuccess:      false,
       lastDeliverables: null,
+      unread:           false,
     };
     this.initPhases(s);
     this.sessions.push(s);
@@ -356,8 +384,33 @@ export class TuiApp {
       this.sessions[this.activeIdx].draft = this.editor.getLine();
     }
     this.activeIdx = idx;
+    this.active.unread = false;   // visiting the tab clears its finished badge
     if (this.editor) this.editor.setLine(this.active.draft || '');
     this.dirty = true;
+  }
+
+  /** Ctrl+W (empty input): close the active session; confirm if it's running. */
+  private closeSession(): void {
+    const s = this.active;
+    if (this.sessions.length === 1 && s.transcript.isEmpty() && !s.running) return;
+    if (s.running) {
+      this.awaitingConfirm = true;
+      this.pendingConfirmAction = async () => { this.reallyCloseSession(s); };
+      s.transcript.push(confirmPrompt('This session has a running pipeline — closing aborts it.'));
+      this.dirty = true;
+      return;
+    }
+    this.reallyCloseSession(s);
+  }
+
+  private reallyCloseSession(s: TuiSession): void {
+    const idx = this.sessions.indexOf(s);
+    if (idx < 0) return;
+    s.abortCtrl?.abort();
+    this.sessions.splice(idx, 1);
+    this.activeIdx = -1;   // closed session's draft dies with it
+    if (this.sessions.length === 0) { this.newSession(); return; }
+    this.switchTo(Math.min(idx, this.sessions.length - 1));
   }
 
   private cycleSession(delta: number): void {
@@ -410,7 +463,8 @@ export class TuiApp {
       body = view.rows;
       if (view.below > 0) {
         body = [...body];
-        body[body.length - 1] = `  ${c.dim(`↓ ${view.below} rows below — esc to follow live output`)}`;
+        const above = view.above > 0 ? ` · ↑ ${view.above} above` : '';
+        body[body.length - 1] = `  ${c.dim(`↓ ${view.below} rows below${above} — esc to follow live output`)}`;
       }
     }
     if (this.palette.visible) {
@@ -439,8 +493,11 @@ export class TuiApp {
     const n = this.sessions.length;
     const maxTabWidth = 40;
     const labelOf = (sess: TuiSession, i: number) => {
-      const running = sess.running ? c.warning('◐') + ' ' : '';
-      return `${i + 1} ${running}${sess.title || 'new'}`;
+      const badge = sess.running        ? c.warning('◐') + ' '
+                  : sess.unread === 'ok'   ? c.success('✓') + ' '
+                  : sess.unread === 'fail' ? c.error('✗')   + ' '
+                  : '';
+      return `${i + 1} ${badge}${sess.title || 'new'}`;
     };
 
     let tabsStr: string;
@@ -505,7 +562,14 @@ export class TuiApp {
     lines.push(center(ctx, w));
     lines.push('');
     lines.push(center(`${c.muted('describe what you want to build, then press')} ${c.text('↵')}`, w));
-    lines.push(center(c.dim('/ commands · tab complete · ctrl+t new session · ctrl+c ×2 quit'), w));
+    lines.push(center(c.dim('/ commands · @ mention files · ctrl+t new session · ctrl+w close · ctrl+c ×2 quit'), w));
+
+    if (this.lastPipeline?.request) {
+      lines.push('');
+      const req = this.lastPipeline.request.replace(/\s+/g, ' ');
+      const short = req.length > 44 ? req.slice(0, 43) + '…' : req;
+      lines.push(center(`${c.dim('↺ last:')} ${c.muted(`“${short}”`)} ${c.dim('· /resume to run again')}`, w));
+    }
 
     const top = Math.max(0, Math.floor((viewH - lines.length) / 2));
     const out = [...Array(top).fill(''), ...lines];
@@ -613,8 +677,8 @@ export class TuiApp {
     else if (this.awaitingConfirm)  left = `  ${c.warning('y to confirm — anything else cancels')}`;
     else if (this.active?.running)  left = `  ${c.dim('↵ steer · esc interrupt · pgup/pgdn scroll · ctrl+t new session')}`;
     else {
-      const multi = this.sessions.length > 1 ? 'tab switch · ' : '';
-      left = `  ${c.dim(`/ commands · ↑ history · ${multi}ctrl+t new session · pgup scroll · ctrl+c ×2 quit`)}`;
+      const multi = this.sessions.length > 1 ? 'tab switch · ctrl+w close · ' : '';
+      left = `  ${c.dim(`/ commands · @ files · ↑ history · ${multi}ctrl+t new session · pgup scroll · ctrl+c ×2 quit`)}`;
     }
     const pct   = this.active ? this.active.chat.getContextPct() : 0;
     const right = pct > 0
@@ -677,7 +741,16 @@ export class TuiApp {
       case 'return':
       case 'enter': {
         const item = this.palette.current();
-        if (item) { this.palette.hide(); this.editor.submit(item.insert); }
+        if (!item) return true;
+        if (item.kind === 'file') {
+          // Completing a mention shouldn't submit — keep composing the request.
+          const text = item.insert + ' ';
+          this.editor.setLine(text);
+          this.palette.update(text);
+        } else {
+          this.palette.hide();
+          this.editor.submit(item.insert);
+        }
         return true;
       }
       case 'escape':
@@ -704,6 +777,7 @@ export class TuiApp {
   private handleCtrlKey(name: string): boolean {
     switch (name) {
       case 't': this.newSession(); return true;
+      case 'w': this.closeSession(); return true;
       case 'l': this.active.transcript.clear(); this.dirty = true; return true;
       case 'n':
         this.runCaptured(this.active, async () => {
@@ -749,6 +823,8 @@ export class TuiApp {
     s.transcript.pushRaw(`  ${c.dim('❯')} ${c.text(input)}`);
     s.transcript.toBottom();
     this.dirty = true;
+    // Editor already appended the line to this.history — persist it.
+    this.historyStore.save(this.history);
 
     // Input stays live — this is what makes mid-run steering possible.
     this.editor.resume();
@@ -796,7 +872,12 @@ export class TuiApp {
     switch (intent.type) {
       case 'exit':    this.quit(); return;
       case 'help':    s.transcript.push(helpPanel(pkg.version)); return;
-      case 'command': await this.runCmd(s, '/' + input.replace(/^\//, '')); return;
+      case 'command': {
+        const cmdName = input.replace(/^\//, '').split(/\s+/)[0];
+        if (cmdName === 'resume' || cmdName === 'r') { this.resumePrefill(s); return; }
+        await this.runCmd(s, '/' + input.replace(/^\//, ''));
+        return;
+      }
       case 'rollback':
         this.awaitingConfirm = true;
         this.pendingConfirmAction = () => this.doRollback(s);
@@ -980,6 +1061,7 @@ export class TuiApp {
       s.orch      = null;
       s.abortCtrl = null;
       s.streamBuf = '';
+      if (s !== this.active) s.unread = s.lastSuccess ? 'ok' : 'fail';
       savePipelineState({
         request, targetDir: this.cfg.projectDir, planOnly,
         model:       this.modelSelector.getCurrentModel() ?? undefined,
@@ -988,6 +1070,7 @@ export class TuiApp {
         success:     s.lastSuccess,
         phases:      [],
       });
+      this.lastPipeline = loadPipelineState();   // keep the welcome-screen hint fresh
       this.dirty = true;
     }
   }
@@ -1079,6 +1162,23 @@ export class TuiApp {
       const rel = selected.replace(this.cfg.projectDir, '').replace(/^[/\\]/, '');
       s.transcript.pushRaw(`  ${c.success('✓')} ${c.text(rel)}`);
     }
+  }
+
+  /** /resume — prefill the input with the last pipeline request instead of
+   *  just printing it, so ↵ reruns and editing tweaks it. */
+  private resumePrefill(s: TuiSession): void {
+    const state = loadPipelineState();
+    if (!state?.request) {
+      s.transcript.pushRaw(`  ${c.muted('No previous pipeline found.')}`);
+      return;
+    }
+    const status = state.success === true  ? c.success('completed')
+                 : state.success === false ? c.error('failed')
+                 : c.warning('interrupted');
+    s.transcript.pushRaw(`  ${c.dim('↺ last pipeline')} ${status}${c.dim(':')} ${c.text(state.request.slice(0, 100))}`);
+    s.transcript.pushRaw(`  ${c.dim('prefilled below — ↵ runs it again, or edit it first')}`);
+    this.editor.setLine(state.request);
+    this.dirty = true;
   }
 
   // ── Command execution ───────────────────────────────────────────────────────
